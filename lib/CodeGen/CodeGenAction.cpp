@@ -123,14 +123,14 @@ namespace clang {
       return true;
     }
 
-    void HandleInlineMethodDefinition(CXXMethodDecl *D) override {
+    void HandleInlineFunctionDefinition(FunctionDecl *D) override {
       PrettyStackTraceDecl CrashInfo(D, SourceLocation(),
                                      Context->getSourceManager(),
-                                     "LLVM IR generation of inline method");
+                                     "LLVM IR generation of inline function");
       if (llvm::TimePassesIsEnabled)
         LLVMIRGeneration.startTimer();
 
-      Gen->HandleInlineMethodDefinition(D);
+      Gen->HandleInlineFunctionDefinition(D);
 
       if (llvm::TimePassesIsEnabled)
         LLVMIRGeneration.stopTimer();
@@ -172,6 +172,8 @@ namespace clang {
         if (Linker::linkModules(*getModule(), std::move(I.second), LinkFlags))
           return;
       }
+
+      EmbedBitcode(getModule(), CodeGenOpts, llvm::MemoryBufferRef());
 
       EmitBackendOutput(Diags, CodeGenOpts, TargetOpts, LangOpts,
                         C.getTargetInfo().getDataLayout(),
@@ -413,9 +415,10 @@ BackendConsumer::StackSizeDiagHandler(const llvm::DiagnosticInfoStackSize &D) {
     return false;
 
   if (const Decl *ND = Gen->GetDeclForMangledName(D.getFunction().getName())) {
+    // FIXME: Shouldn't need to truncate to uint32_t
     Diags.Report(ND->getASTContext().getFullLoc(ND->getLocation()),
                  diag::warn_fe_frame_larger_than)
-        << D.getStackSize() << Decl::castToDeclContext(ND);
+      << static_cast<uint32_t>(D.getStackSize()) << Decl::castToDeclContext(ND);
     return true;
   }
 
@@ -454,7 +457,7 @@ const FullSourceLoc BackendConsumer::getBestLocationFromDebugLoc(
     // we could not translate this location. This can happen in the
     // case of #line directives.
     Diags.Report(Loc, diag::note_fe_backend_invalid_loc)
-        << Filename << Line;
+        << Filename << Line << Column;
 
   return Loc;
 }
@@ -532,7 +535,7 @@ void BackendConsumer::OptimizationRemarkHandler(
   // llvm::DiagnosticInfo::AlwasyPrint or if the -Rpass-analysis flag has a
   // regular expression that matches the name of the pass name in \p D.
 
-  if (D.getPassName() == llvm::DiagnosticInfo::AlwaysPrint ||
+  if (D.shouldAlwaysPrint() ||
       (CodeGenOpts.OptimizationRemarkAnalysisPattern &&
        CodeGenOpts.OptimizationRemarkAnalysisPattern->match(D.getPassName())))
     EmitOptimizationMessage(
@@ -545,7 +548,7 @@ void BackendConsumer::OptimizationRemarkHandler(
   // llvm::DiagnosticInfo::AlwasyPrint or if the -Rpass-analysis flag has a
   // regular expression that matches the name of the pass name in \p D.
 
-  if (D.getPassName() == llvm::DiagnosticInfo::AlwaysPrint ||
+  if (D.shouldAlwaysPrint() ||
       (CodeGenOpts.OptimizationRemarkAnalysisPattern &&
        CodeGenOpts.OptimizationRemarkAnalysisPattern->match(D.getPassName())))
     EmitOptimizationMessage(
@@ -558,7 +561,7 @@ void BackendConsumer::OptimizationRemarkHandler(
   // llvm::DiagnosticInfo::AlwasyPrint or if the -Rpass-analysis flag has a
   // regular expression that matches the name of the pass name in \p D.
 
-  if (D.getPassName() == llvm::DiagnosticInfo::AlwaysPrint ||
+  if (D.shouldAlwaysPrint() ||
       (CodeGenOpts.OptimizationRemarkAnalysisPattern &&
        CodeGenOpts.OptimizationRemarkAnalysisPattern->match(D.getPassName())))
     EmitOptimizationMessage(
@@ -760,6 +763,22 @@ static void BitcodeInlineAsmDiagHandler(const llvm::SMDiagnostic &SM,
                                          void *Context,
                                          unsigned LocCookie) {
   SM.print(nullptr, llvm::errs());
+
+  auto Diags = static_cast<DiagnosticsEngine *>(Context);
+  unsigned DiagID;
+  switch (SM.getKind()) {
+  case llvm::SourceMgr::DK_Error:
+    DiagID = diag::err_fe_inline_asm;
+    break;
+  case llvm::SourceMgr::DK_Warning:
+    DiagID = diag::warn_fe_inline_asm;
+    break;
+  case llvm::SourceMgr::DK_Note:
+    DiagID = diag::note_fe_inline_asm;
+    break;
+  }
+
+  Diags->Report(DiagID).AddString("cannot compile inline asm");
 }
 
 void CodeGenAction::ExecuteAction() {
@@ -777,6 +796,11 @@ void CodeGenAction::ExecuteAction() {
     llvm::MemoryBuffer *MainFile = SM.getBuffer(FID, &Invalid);
     if (Invalid)
       return;
+
+    // For ThinLTO backend invocations, ensure that the context
+    // merges types based on ODR identifiers.
+    if (!CI.getCodeGenOpts().ThinLTOIndexFile.empty())
+      VMContext->enableDebugTypeODRUniquing();
 
     llvm::SMDiagnostic Err;
     TheModule = parseIR(MainFile->getMemBufferRef(), Err, *VMContext);
@@ -810,8 +834,13 @@ void CodeGenAction::ExecuteAction() {
       TheModule->setTargetTriple(TargetOpts.Triple);
     }
 
+    EmbedBitcode(TheModule.get(), CI.getCodeGenOpts(),
+                 MainFile->getMemBufferRef());
+
     LLVMContext &Ctx = TheModule->getContext();
-    Ctx.setInlineAsmDiagnosticHandler(BitcodeInlineAsmDiagHandler);
+    Ctx.setInlineAsmDiagnosticHandler(BitcodeInlineAsmDiagHandler,
+                                      &CI.getDiagnostics());
+
     EmitBackendOutput(CI.getDiagnostics(), CI.getCodeGenOpts(), TargetOpts,
                       CI.getLangOpts(), CI.getTarget().getDataLayout(),
                       TheModule.get(), BA, OS);

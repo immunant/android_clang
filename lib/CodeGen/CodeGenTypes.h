@@ -31,7 +31,6 @@ class StructType;
 }
 
 namespace clang {
-class ABIInfo;
 class ASTContext;
 template <typename> class CanQual;
 class CXXConstructorDecl;
@@ -51,6 +50,7 @@ class Type;
 typedef CanQual<Type> CanQualType;
 
 namespace CodeGen {
+class ABIInfo;
 class CGCXXABI;
 class CGRecordLayout;
 class CodeGenModule;
@@ -164,6 +164,8 @@ class CodeGenTypes {
 
   llvm::SmallSet<const Type *, 8> RecordsWithOpaqueMemberPointers;
 
+  unsigned ClangCallConvToLLVMCallConv(CallingConv CC);
+
 public:
   CodeGenTypes(CodeGenModule &cgm);
   ~CodeGenTypes();
@@ -204,6 +206,11 @@ public:
   /// type).
   bool isFuncTypeConvertible(const FunctionType *FT);
   bool isFuncParamTypeConvertible(QualType Ty);
+
+  /// Determine if a C++ inheriting constructor should have parameters matching
+  /// those of its inherited constructor.
+  bool inheritingCtorHasParams(const InheritedConstructor &Inherited,
+                               CXXCtorType Type);
 
   /// GetFunctionTypeForVTable - Get the LLVM function type for use in a vtable,
   /// given a CXXMethodDecl. If the method to has an incomplete return type,
