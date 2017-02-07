@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
@@ -89,13 +90,13 @@ GetFlattenedSpellings(const Record &Attr) {
 
 static std::string ReadPCHRecord(StringRef type) {
   return StringSwitch<std::string>(type)
-    .EndsWith("Decl *", "GetLocalDeclAs<" 
-              + std::string(type, 0, type.size()-1) + ">(F, Record[Idx++])")
-    .Case("TypeSourceInfo *", "GetTypeSourceInfo(F, Record, Idx)")
-    .Case("Expr *", "ReadExpr(F)")
-    .Case("IdentifierInfo *", "GetIdentifierInfo(F, Record, Idx)")
-    .Case("StringRef", "ReadString(Record, Idx)")
-    .Default("Record[Idx++]");
+    .EndsWith("Decl *", "Record.GetLocalDeclAs<" 
+              + std::string(type, 0, type.size()-1) + ">(Record.readInt())")
+    .Case("TypeSourceInfo *", "Record.getTypeSourceInfo()")
+    .Case("Expr *", "Record.readExpr()")
+    .Case("IdentifierInfo *", "Record.getIdentifierInfo()")
+    .Case("StringRef", "Record.readString()")
+    .Default("Record.readInt()");
 }
 
 // Get a type that is suitable for storing an object of the specified type.
@@ -120,12 +121,8 @@ static std::string WritePCHRecord(StringRef type, StringRef name) {
 // underscores. For example, __foo, foo__, __foo__ would
 // become foo.
 static StringRef NormalizeAttrName(StringRef AttrName) {
-  if (AttrName.startswith("__"))
-    AttrName = AttrName.substr(2, AttrName.size());
-
-  if (AttrName.endswith("__"))
-    AttrName = AttrName.substr(0, AttrName.size() - 2);
-
+  AttrName.consume_front("__");
+  AttrName.consume_back("__");
   return AttrName;
 }
 
@@ -136,10 +133,9 @@ static StringRef NormalizeNameForSpellingComparison(StringRef Name) {
   return Name.trim("_");
 }
 
-// Normalize attribute spelling only if the spelling has both leading
-// and trailing underscores. For example, __ms_struct__ will be 
-// normalized to "ms_struct"; __cdecl will remain intact.
-static StringRef NormalizeAttrSpelling(StringRef AttrSpelling) {
+// Normalize the spelling of a GNU attribute (i.e. "x" in "__attribute__((x))"),
+// removing "__" if it appears at the beginning and end of the attribute's name.
+static StringRef NormalizeGNUAttrSpelling(StringRef AttrSpelling) {
   if (AttrSpelling.startswith("__") && AttrSpelling.endswith("__")) {
     AttrSpelling = AttrSpelling.substr(2, AttrSpelling.size() - 4);
   }
@@ -299,7 +295,13 @@ namespace {
         OS << "\" << get" << getUpperName()
            << "()->getNameInfo().getAsString() << \"";
       } else if (type == "IdentifierInfo *") {
-        OS << "\" << get" << getUpperName() << "()->getName() << \"";
+        OS << "\";\n";
+        if (isOptional())
+          OS << "    if (get" << getUpperName() << "()) ";
+        else
+          OS << "    ";
+        OS << "OS << get" << getUpperName() << "()->getName();\n";
+        OS << "    OS << \"";
       } else if (type == "TypeSourceInfo *") {
         OS << "\" << get" << getUpperName() << "().getAsString() << \"";
       } else {
@@ -411,7 +413,7 @@ namespace {
 
     void writePCHReadDecls(raw_ostream &OS) const override {
       OS << "    std::string " << getLowerName()
-         << "= ReadString(Record, Idx);\n";
+         << "= Record.readString();\n";
     }
 
     void writePCHReadArgs(raw_ostream &OS) const override {
@@ -537,13 +539,13 @@ namespace {
     }
 
     void writePCHReadDecls(raw_ostream &OS) const override {
-      OS << "    bool is" << getLowerName() << "Expr = Record[Idx++];\n";
+      OS << "    bool is" << getLowerName() << "Expr = Record.readInt();\n";
       OS << "    void *" << getLowerName() << "Ptr;\n";
       OS << "    if (is" << getLowerName() << "Expr)\n";
-      OS << "      " << getLowerName() << "Ptr = ReadExpr(F);\n";
+      OS << "      " << getLowerName() << "Ptr = Record.readExpr();\n";
       OS << "    else\n";
       OS << "      " << getLowerName()
-         << "Ptr = GetTypeSourceInfo(F, Record, Idx);\n";
+         << "Ptr = Record.getTypeSourceInfo();\n";
     }
 
     void writePCHWrite(raw_ostream &OS) const override {
@@ -656,7 +658,7 @@ namespace {
     }
 
     void writePCHReadDecls(raw_ostream &OS) const override {
-      OS << "    unsigned " << getLowerName() << "Size = Record[Idx++];\n";
+      OS << "    unsigned " << getLowerName() << "Size = Record.readInt();\n";
       OS << "    SmallVector<" << getType() << ", 4> "
          << getLowerName() << ";\n";
       OS << "    " << getLowerName() << ".reserve(" << getLowerName()
@@ -717,13 +719,10 @@ namespace {
   std::vector<std::string>
   uniqueEnumsInOrder(const std::vector<std::string> &enums) {
     std::vector<std::string> uniques;
-    std::set<std::string> unique_set(enums.begin(), enums.end());
+    SmallDenseSet<StringRef, 8> unique_set;
     for (const auto &i : enums) {
-      auto set_i = unique_set.find(i);
-      if (set_i != unique_set.end()) {
+      if (unique_set.insert(i).second)
         uniques.push_back(i);
-        unique_set.erase(set_i);
-      }
     }
     return uniques;
   }
@@ -784,7 +783,7 @@ namespace {
     void writePCHReadDecls(raw_ostream &OS) const override {
       OS << "    " << getAttrName() << "Attr::" << type << " " << getLowerName()
          << "(static_cast<" << getAttrName() << "Attr::" << type
-         << ">(Record[Idx++]));\n";
+         << ">(Record.readInt()));\n";
     }
 
     void writePCHReadArgs(raw_ostream &OS) const override {
@@ -835,7 +834,7 @@ namespace {
       OS << "  static const char *Convert" << type << "ToStr("
          << type << " Val) {\n"
          << "    switch(Val) {\n";
-      std::set<std::string> Uniques;
+      SmallDenseSet<StringRef, 8> Uniques;
       for (size_t I = 0; I < enums.size(); ++I) {
         if (Uniques.insert(enums[I]).second)
           OS << "    case " << getAttrName() << "Attr::" << enums[I]
@@ -907,14 +906,14 @@ namespace {
     }
 
     void writePCHReadDecls(raw_ostream &OS) const override {
-      OS << "    unsigned " << getLowerName() << "Size = Record[Idx++];\n";
+      OS << "    unsigned " << getLowerName() << "Size = Record.readInt();\n";
       OS << "    SmallVector<" << QualifiedTypeName << ", 4> " << getLowerName()
          << ";\n";
       OS << "    " << getLowerName() << ".reserve(" << getLowerName()
          << "Size);\n";
       OS << "    for (unsigned i = " << getLowerName() << "Size; i; --i)\n";
       OS << "      " << getLowerName() << ".push_back(" << "static_cast<"
-         << QualifiedTypeName << ">(Record[Idx++]));\n";
+         << QualifiedTypeName << ">(Record.readInt()));\n";
     }
 
     void writePCHWrite(raw_ostream &OS) const override {
@@ -943,7 +942,7 @@ namespace {
       OS << "  static const char *Convert" << type << "ToStr("
         << type << " Val) {\n"
         << "    switch(Val) {\n";
-      std::set<std::string> Uniques;
+      SmallDenseSet<StringRef, 8> Uniques;
       for (size_t I = 0; I < enums.size(); ++I) {
         if (Uniques.insert(enums[I]).second)
           OS << "    case " << getAttrName() << "Attr::" << enums[I]
@@ -997,7 +996,7 @@ namespace {
 
     void writePCHReadDecls(raw_ostream &OS) const override {
       OS << "    VersionTuple " << getLowerName()
-         << "= ReadVersionTuple(Record, Idx);\n";
+         << "= Record.readVersionTuple();\n";
     }
 
     void writePCHReadArgs(raw_ostream &OS) const override {
@@ -1312,6 +1311,9 @@ writePrettyPrintFunction(Record &R,
     } else if (Variety == "Declspec") {
       Prefix = " __declspec(";
       Suffix = ")";
+    } else if (Variety == "Microsoft") {
+      Prefix = "[";
+      Suffix = "]";
     } else if (Variety == "Keyword") {
       Prefix = " ";
       Suffix = "";
@@ -1344,11 +1346,8 @@ writePrettyPrintFunction(Record &R,
 
     // Fake arguments aren't part of the parsed form and should not be
     // pretty-printed.
-    bool hasNonFakeArgs = false;
-    for (const auto &arg : Args) {
-      if (arg->isFake()) continue;
-      hasNonFakeArgs = true;
-    }
+    bool hasNonFakeArgs = llvm::any_of(
+        Args, [](const std::unique_ptr<Argument> &A) { return !A->isFake(); });
 
     // FIXME: always printing the parenthesis isn't the correct behavior for
     // attributes which have optional arguments that were not provided. For
@@ -1408,18 +1407,20 @@ getSpellingListIndex(const std::vector<FlattenedSpelling> &SpellingList,
 
 static void writeAttrAccessorDefinition(const Record &R, raw_ostream &OS) {
   std::vector<Record*> Accessors = R.getValueAsListOfDefs("Accessors");
+  if (Accessors.empty())
+    return;
+
+  const std::vector<FlattenedSpelling> SpellingList = GetFlattenedSpellings(R);
+  assert(!SpellingList.empty() &&
+         "Attribute with empty spelling list can't have accessors!");
   for (const auto *Accessor : Accessors) {
     std::string Name = Accessor->getValueAsString("Name");
-    std::vector<FlattenedSpelling> Spellings = 
-      GetFlattenedSpellings(*Accessor);
-    std::vector<FlattenedSpelling> SpellingList = GetFlattenedSpellings(R);
-    assert(!SpellingList.empty() &&
-           "Attribute with empty spelling list can't have accessors!");
+    std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(*Accessor);
 
     OS << "  bool " << Name << "() const { return SpellingListIndex == ";
     for (unsigned Index = 0; Index < Spellings.size(); ++Index) {
       OS << getSpellingListIndex(SpellingList, Spellings[Index]);
-      if (Index != Spellings.size() -1)
+      if (Index != Spellings.size() - 1)
         OS << " ||\n    SpellingListIndex == ";
       else
         OS << "; }\n";
@@ -1521,6 +1522,16 @@ static void emitClangAttrLateParsedList(RecordKeeper &Records, raw_ostream &OS) 
   OS << "#endif // CLANG_ATTR_LATE_PARSED_LIST\n\n";
 }
 
+template <typename Fn>
+static void forEachUniqueSpelling(const Record &Attr, Fn &&F) {
+  std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(Attr);
+  SmallDenseSet<StringRef, 8> Seen;
+  for (const FlattenedSpelling &S : Spellings) {
+    if (Seen.insert(S.name()).second)
+      F(S);
+  }
+}
+
 /// \brief Emits the first-argument-is-type property for attributes.
 static void emitClangAttrTypeArgList(RecordKeeper &Records, raw_ostream &OS) {
   OS << "#if defined(CLANG_ATTR_TYPE_ARG_LIST)\n";
@@ -1536,12 +1547,9 @@ static void emitClangAttrTypeArgList(RecordKeeper &Records, raw_ostream &OS) {
       continue;
 
     // All these spellings take a single type argument.
-    std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(*Attr);
-    std::set<std::string> Emitted;
-    for (const auto &S : Spellings) {
-      if (Emitted.insert(S.name()).second)
-        OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
-    }
+    forEachUniqueSpelling(*Attr, [&](const FlattenedSpelling &S) {
+      OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
+    });
   }
   OS << "#endif // CLANG_ATTR_TYPE_ARG_LIST\n\n";
 }
@@ -1558,12 +1566,9 @@ static void emitClangAttrArgContextList(RecordKeeper &Records, raw_ostream &OS) 
       continue;
 
     // All these spellings take are parsed unevaluated.
-    std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(Attr);
-    std::set<std::string> Emitted;
-    for (const auto &S : Spellings) {
-      if (Emitted.insert(S.name()).second)
-        OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
-    }
+    forEachUniqueSpelling(Attr, [&](const FlattenedSpelling &S) {
+      OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
+    });
   }
   OS << "#endif // CLANG_ATTR_ARG_CONTEXT_LIST\n\n";
 }
@@ -1589,12 +1594,9 @@ static void emitClangAttrIdentifierArgList(RecordKeeper &Records, raw_ostream &O
       continue;
 
     // All these spellings take an identifier argument.
-    std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(*Attr);
-    std::set<std::string> Emitted;
-    for (const auto &S : Spellings) {
-      if (Emitted.insert(S.name()).second)
-        OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
-    }
+    forEachUniqueSpelling(*Attr, [&](const FlattenedSpelling &S) {
+      OS << ".Case(\"" << S.name() << "\", " << "true" << ")\n";
+    });
   }
   OS << "#endif // CLANG_ATTR_IDENTIFIER_ARG_LIST\n\n";
 }
@@ -1882,8 +1884,7 @@ static void emitAttrList(raw_ostream &OS, StringRef Class,
 // Determines if an attribute has a Pragma spelling.
 static bool AttrHasPragmaSpelling(const Record *R) {
   std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(*R);
-  return std::find_if(Spellings.begin(), Spellings.end(),
-                      [](const FlattenedSpelling &S) {
+  return llvm::find_if(Spellings, [](const FlattenedSpelling &S) {
            return S.variety() == "Pragma";
          }) != Spellings.end();
 }
@@ -2125,9 +2126,9 @@ void EmitClangAttrPCHRead(RecordKeeper &Records, raw_ostream &OS) {
     
     OS << "  case attr::" << R.getName() << ": {\n";
     if (R.isSubClassOf(InhClass))
-      OS << "    bool isInherited = Record[Idx++];\n";
-    OS << "    bool isImplicit = Record[Idx++];\n";
-    OS << "    unsigned Spelling = Record[Idx++];\n";
+      OS << "    bool isInherited = Record.readInt();\n";
+    OS << "    bool isImplicit = Record.readInt();\n";
+    OS << "    unsigned Spelling = Record.readInt();\n";
     ArgRecords = R.getValueAsListOfDefs("Args");
     Args.clear();
     for (const auto *Arg : ArgRecords) {
@@ -2295,7 +2296,7 @@ void EmitClangAttrHasAttrImpl(RecordKeeper &Records, raw_ostream &OS) {
   // Separate all of the attributes out into four group: generic, C++11, GNU,
   // and declspecs. Then generate a big switch statement for each of them.
   std::vector<Record *> Attrs = Records.getAllDerivedDefinitions("Attr");
-  std::vector<Record *> Declspec, GNU, Pragma;
+  std::vector<Record *> Declspec, Microsoft, GNU, Pragma;
   std::map<std::string, std::vector<Record *>> CXX;
 
   // Walk over the list of all attributes, and split them out based on the
@@ -2308,6 +2309,8 @@ void EmitClangAttrHasAttrImpl(RecordKeeper &Records, raw_ostream &OS) {
         GNU.push_back(R);
       else if (Variety == "Declspec")
         Declspec.push_back(R);
+      else if (Variety == "Microsoft")
+        Microsoft.push_back(R);
       else if (Variety == "CXX11")
         CXX[SI.nameSpace()].push_back(R);
       else if (Variety == "Pragma")
@@ -2323,6 +2326,9 @@ void EmitClangAttrHasAttrImpl(RecordKeeper &Records, raw_ostream &OS) {
   OS << "case AttrSyntax::Declspec:\n";
   OS << "  return llvm::StringSwitch<int>(Name)\n";
   GenerateHasAttrSpellingStringSwitch(Declspec, OS, "Declspec");
+  OS << "case AttrSyntax::Microsoft:\n";
+  OS << "  return llvm::StringSwitch<int>(Name)\n";
+  GenerateHasAttrSpellingStringSwitch(Microsoft, OS, "Microsoft");
   OS << "case AttrSyntax::Pragma:\n";
   OS << "  return llvm::StringSwitch<int>(Name)\n";
   GenerateHasAttrSpellingStringSwitch(Pragma, OS, "Pragma");
@@ -2361,8 +2367,9 @@ void EmitClangAttrSpellingListIndex(RecordKeeper &Records, raw_ostream &OS) {
                 .Case("GNU", 0)
                 .Case("CXX11", 1)
                 .Case("Declspec", 2)
-                .Case("Keyword", 3)
-                .Case("Pragma", 4)
+                .Case("Microsoft", 3)
+                .Case("Keyword", 4)
+                .Case("Pragma", 5)
                 .Default(0)
          << " && Scope == \"" << Spellings[I].nameSpace() << "\")\n"
          << "        return " << I << ";\n";
@@ -2532,6 +2539,10 @@ static void emitArgInfo(const Record &R, std::stringstream &OS) {
   unsigned ArgCount = 0, OptCount = 0;
   bool HasVariadic = false;
   for (const auto *Arg : Args) {
+    // If the arg is fake, it's the user's job to supply it: general parsing
+    // logic shouldn't need to know anything about it.
+    if (Arg->getValueAsBit("Fake"))
+      continue;
     Arg->getValueAsBit("Optional") ? ++OptCount : ++ArgCount;
     if (!HasVariadic && isArgVariadic(*Arg, R.getName()))
       HasVariadic = true;
@@ -2653,6 +2664,15 @@ static std::string CalculateDiagnostic(const Record &S) {
       return "(S.getLangOpts().CPlusPlus ? ExpectedFunctionVariableOrClass : "
                                            "ExpectedVariableOrFunction)";
 
+    case Func | Var | Class | ObjCInterface:
+      return "(S.getLangOpts().CPlusPlus"
+             "     ? ((S.getLangOpts().ObjC1 || S.getLangOpts().ObjC2)"
+             "            ? ExpectedFunctionVariableClassOrObjCInterface"
+             "            : ExpectedFunctionVariableOrClass)"
+             "     : ((S.getLangOpts().ObjC1 || S.getLangOpts().ObjC2)"
+             "            ? ExpectedFunctionVariableOrObjCInterface"
+             "            : ExpectedVariableOrFunction))";
+
     case ObjCMethod | ObjCProp: return "ExpectedMethodOrProperty";
     case ObjCProtocol | ObjCInterface:
       return "ExpectedObjectiveCInterfaceOrProtocol";
@@ -2666,7 +2686,7 @@ static std::string CalculateDiagnostic(const Record &S) {
 }
 
 static std::string GetSubjectWithSuffix(const Record *R) {
-  std::string B = R->getName();
+  const std::string &B = R->getName();
   if (B == "DeclBase")
     return "Decl";
   return B + "Decl";
@@ -2674,7 +2694,7 @@ static std::string GetSubjectWithSuffix(const Record *R) {
 
 static std::string GenerateCustomAppertainsTo(const Record &Subject,
                                               raw_ostream &OS) {
-  std::string FnName = "is" + Subject.getName();
+  std::string FnName = "is" + Subject.getName().str();
 
   // If this code has already been generated, simply return the previous
   // instance of it.
@@ -2723,7 +2743,7 @@ static std::string GenerateAppertainsTo(const Record &Attr, raw_ostream &OS) {
   // Otherwise, generate an appertainsTo check specific to this attribute which
   // checks all of the given subjects against the Decl passed in. Return the
   // name of that check to the caller.
-  std::string FnName = "check" + Attr.getName() + "AppertainsTo";
+  std::string FnName = "check" + Attr.getName().str() + "AppertainsTo";
   std::stringstream SS;
   SS << "static bool " << FnName << "(Sema &S, const AttributeList &Attr, ";
   SS << "const Decl *D) {\n";
@@ -2781,8 +2801,10 @@ static std::string GenerateLangOptRequirements(const Record &R,
   std::string FnName = "check", Test;
   for (auto I = LangOpts.begin(), E = LangOpts.end(); I != E; ++I) {
     std::string Part = (*I)->getValueAsString("Name");
-    if ((*I)->getValueAsBit("Negated"))
+    if ((*I)->getValueAsBit("Negated")) {
+      FnName += "Not";
       Test += "!";
+    }
     Test += "S.LangOpts." + Part;
     if (I + 1 != E)
       Test += " || ";
@@ -2844,7 +2866,7 @@ static std::string GenerateTargetRequirements(const Record &Attr,
       if (I.first == APK) {
         std::vector<std::string> DA = I.second->getValueAsDef("Target")
                                           ->getValueAsListOfStrings("Arches");
-        std::copy(DA.begin(), DA.end(), std::back_inserter(Arches));
+        std::move(DA.begin(), DA.end(), std::back_inserter(Arches));
       }
     }
   }
@@ -2892,7 +2914,7 @@ static std::string GenerateSpellingIndexToSemanticSpelling(const Record &Attr,
   // Generate the enumeration we will use for the mapping.
   SemanticSpellingMap SemanticToSyntacticMap;
   std::string Enum = CreateSemanticSpellings(Spellings, SemanticToSyntacticMap);
-  std::string Name = Attr.getName() + "AttrSpellingMap";
+  std::string Name = Attr.getName().str() + "AttrSpellingMap";
 
   OS << "static unsigned " << Name << "(const AttributeList &Attr) {\n";
   OS << Enum;
@@ -2906,12 +2928,9 @@ static std::string GenerateSpellingIndexToSemanticSpelling(const Record &Attr,
 static bool IsKnownToGCC(const Record &Attr) {
   // Look at the spellings for this subject; if there are any spellings which
   // claim to be known to GCC, the attribute is known to GCC.
-  std::vector<FlattenedSpelling> Spellings = GetFlattenedSpellings(Attr);
-  for (const auto &I : Spellings) {
-    if (I.knownToGCC())
-      return true;
-  }
-  return false;
+  return llvm::any_of(
+      GetFlattenedSpellings(Attr),
+      [](const FlattenedSpelling &S) { return S.knownToGCC(); });
 }
 
 /// Emits the parsed attribute helpers
@@ -2973,7 +2992,8 @@ void EmitClangAttrParsedAttrKinds(RecordKeeper &Records, raw_ostream &OS) {
   emitSourceFileHeader("Attribute name matcher", OS);
 
   std::vector<Record *> Attrs = Records.getAllDerivedDefinitions("Attr");
-  std::vector<StringMatcher::StringPair> GNU, Declspec, CXX11, Keywords, Pragma;
+  std::vector<StringMatcher::StringPair> GNU, Declspec, Microsoft, CXX11,
+      Keywords, Pragma;
   std::set<std::string> Seen;
   for (const auto *A : Attrs) {
     const Record &Attr = *A;
@@ -3015,6 +3035,8 @@ void EmitClangAttrParsedAttrKinds(RecordKeeper &Records, raw_ostream &OS) {
           Matches = &GNU;
         else if (Variety == "Declspec")
           Matches = &Declspec;
+        else if (Variety == "Microsoft")
+          Matches = &Microsoft;
         else if (Variety == "Keyword")
           Matches = &Keywords;
         else if (Variety == "Pragma")
@@ -3022,7 +3044,11 @@ void EmitClangAttrParsedAttrKinds(RecordKeeper &Records, raw_ostream &OS) {
 
         assert(Matches && "Unsupported spelling variety found");
 
-        Spelling += NormalizeAttrSpelling(RawSpelling);
+        if (Variety == "GNU")
+          Spelling += NormalizeGNUAttrSpelling(RawSpelling);
+        else
+          Spelling += RawSpelling;
+
         if (SemaHandler)
           Matches->push_back(StringMatcher::StringPair(Spelling,
                               "return AttributeList::AT_" + AttrName + ";"));
@@ -3039,6 +3065,8 @@ void EmitClangAttrParsedAttrKinds(RecordKeeper &Records, raw_ostream &OS) {
   StringMatcher("Name", GNU, OS).Emit();
   OS << "  } else if (AttributeList::AS_Declspec == Syntax) {\n";
   StringMatcher("Name", Declspec, OS).Emit();
+  OS << "  } else if (AttributeList::AS_Microsoft == Syntax) {\n";
+  StringMatcher("Name", Microsoft, OS).Emit();
   OS << "  } else if (AttributeList::AS_CXX11 == Syntax) {\n";
   StringMatcher("Name", CXX11, OS).Emit();
   OS << "  } else if (AttributeList::AS_Keyword == Syntax || ";
@@ -3122,8 +3150,9 @@ enum SpellingKind {
   GNU = 1 << 0,
   CXX11 = 1 << 1,
   Declspec = 1 << 2,
-  Keyword = 1 << 3,
-  Pragma = 1 << 4
+  Microsoft = 1 << 3,
+  Keyword = 1 << 4,
+  Pragma = 1 << 5
 };
 
 static void WriteDocumentation(const DocumentationData &Doc,
@@ -3171,6 +3200,7 @@ static void WriteDocumentation(const DocumentationData &Doc,
                             .Case("GNU", GNU)
                             .Case("CXX11", CXX11)
                             .Case("Declspec", Declspec)
+                            .Case("Microsoft", Microsoft)
                             .Case("Keyword", Keyword)
                             .Case("Pragma", Pragma);
 

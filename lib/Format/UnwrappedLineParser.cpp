@@ -360,14 +360,15 @@ void UnwrappedLineParser::calculateBraceTypes(bool ExpectClassBody) {
           // BlockKind later if we parse a braced list (where all blocks
           // inside are by default braced lists), or when we explicitly detect
           // blocks (for example while parsing lambdas).
-          //
-          // We exclude + and - as they can be ObjC visibility modifiers.
           ProbablyBracedList =
               (Style.Language == FormatStyle::LK_JavaScript &&
-               NextTok->isOneOf(Keywords.kw_of, Keywords.kw_in)) ||
+               NextTok->isOneOf(Keywords.kw_of, Keywords.kw_in,
+                                Keywords.kw_as)) ||
               NextTok->isOneOf(tok::comma, tok::period, tok::colon,
                                tok::r_paren, tok::r_square, tok::l_brace,
                                tok::l_square, tok::l_paren, tok::ellipsis) ||
+              (NextTok->is(tok::identifier) &&
+               !PrevTok->isOneOf(tok::semi, tok::r_brace, tok::l_brace)) ||
               (NextTok->is(tok::semi) &&
                (!ExpectClassBody || LBraceStack.size() != 1)) ||
               (NextTok->isBinaryOperator() && !NextIsObjCMethod);
@@ -668,19 +669,21 @@ static bool mustBeJSIdent(const AdditionalKeywords &Keywords,
   // FIXME: This returns true for C/C++ keywords like 'struct'.
   return FormatTok->is(tok::identifier) &&
          (FormatTok->Tok.getIdentifierInfo() == nullptr ||
-          !FormatTok->isOneOf(Keywords.kw_in, Keywords.kw_of, Keywords.kw_as,
-                              Keywords.kw_async, Keywords.kw_await,
-                              Keywords.kw_yield, Keywords.kw_finally,
-                              Keywords.kw_function, Keywords.kw_import,
-                              Keywords.kw_is, Keywords.kw_let, Keywords.kw_var,
-                              Keywords.kw_abstract, Keywords.kw_extends,
-                              Keywords.kw_implements, Keywords.kw_instanceof,
-                              Keywords.kw_interface, Keywords.kw_throws));
+          !FormatTok->isOneOf(
+              Keywords.kw_in, Keywords.kw_of, Keywords.kw_as, Keywords.kw_async,
+              Keywords.kw_await, Keywords.kw_yield, Keywords.kw_finally,
+              Keywords.kw_function, Keywords.kw_import, Keywords.kw_is,
+              Keywords.kw_let, Keywords.kw_var, tok::kw_const,
+              Keywords.kw_abstract, Keywords.kw_extends, Keywords.kw_implements,
+              Keywords.kw_instanceof, Keywords.kw_interface,
+              Keywords.kw_throws));
 }
 
 static bool mustBeJSIdentOrValue(const AdditionalKeywords &Keywords,
                                  const FormatToken *FormatTok) {
-  return FormatTok->Tok.isLiteral() || mustBeJSIdent(Keywords, FormatTok);
+  return FormatTok->Tok.isLiteral() ||
+         FormatTok->isOneOf(tok::kw_true, tok::kw_false) ||
+         mustBeJSIdent(Keywords, FormatTok);
 }
 
 // isJSDeclOrStmt returns true if |FormatTok| starts a declaration or statement
@@ -724,6 +727,8 @@ void UnwrappedLineParser::readTokenWithJavaScriptASI() {
     return;
 
   bool PreviousMustBeValue = mustBeJSIdentOrValue(Keywords, Previous);
+  bool PreviousStartsTemplateExpr =
+      Previous->is(TT_TemplateString) && Previous->TokenText.endswith("${");
   if (PreviousMustBeValue && Line && Line->Tokens.size() > 1) {
     // If the token before the previous one is an '@', the previous token is an
     // annotation and can precede another identifier/value.
@@ -732,14 +737,17 @@ void UnwrappedLineParser::readTokenWithJavaScriptASI() {
       return;
   }
   if (Next->is(tok::exclaim) && PreviousMustBeValue)
-    addUnwrappedLine();
+    return addUnwrappedLine();
   bool NextMustBeValue = mustBeJSIdentOrValue(Keywords, Next);
-  if (NextMustBeValue && (PreviousMustBeValue ||
-                          Previous->isOneOf(tok::r_square, tok::r_paren,
-                                            tok::plusplus, tok::minusminus)))
-    addUnwrappedLine();
+  bool NextEndsTemplateExpr =
+      Next->is(TT_TemplateString) && Next->TokenText.startswith("}");
+  if (NextMustBeValue && !NextEndsTemplateExpr && !PreviousStartsTemplateExpr &&
+      (PreviousMustBeValue ||
+       Previous->isOneOf(tok::r_square, tok::r_paren, tok::plusplus,
+                         tok::minusminus)))
+    return addUnwrappedLine();
   if (PreviousMustBeValue && isJSDeclOrStmt(Keywords, Next))
-    addUnwrappedLine();
+    return addUnwrappedLine();
 }
 
 void UnwrappedLineParser::parseStructuralElement() {
@@ -906,8 +914,8 @@ void UnwrappedLineParser::parseStructuralElement() {
       if (FormatTok->is(tok::colon)) {
         nextToken();
         addUnwrappedLine();
+        return;
       }
-      return;
     }
     // In all other cases, parse the declaration.
     break;
@@ -1222,9 +1230,11 @@ void UnwrappedLineParser::tryToParseJSFunction() {
   // Consume "function".
   nextToken();
 
-  // Consume * (generator function).
-  if (FormatTok->is(tok::star))
+  // Consume * (generator function). Treat it like C++'s overloaded operators.
+  if (FormatTok->is(tok::star)) {
+    FormatTok->Type = TT_OverloadedOperator;
     nextToken();
+  }
 
   // Consume function name.
   if (FormatTok->is(tok::identifier))
@@ -1245,9 +1255,12 @@ void UnwrappedLineParser::tryToParseJSFunction() {
     if (FormatTok->is(tok::l_brace))
       tryToParseBracedList();
     else
-      while (FormatTok->isNot(tok::l_brace) && !eof())
+      while (!FormatTok->isOneOf(tok::l_brace, tok::semi) && !eof())
         nextToken();
   }
+
+  if (FormatTok->is(tok::semi))
+    return;
 
   parseChildBlock();
 }
@@ -1961,7 +1974,14 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
       !FormatTok->isStringLiteral())
     return;
 
-  while (!eof() && FormatTok->isNot(tok::semi)) {
+  while (!eof()) {
+    if (FormatTok->is(tok::semi))
+      return;
+    if (Line->Tokens.size() == 0) {
+      // Common issue: Automatic Semicolon Insertion wrapped the line, so the
+      // import statement should terminate.
+      return;
+    }
     if (FormatTok->is(tok::l_brace)) {
       FormatTok->BlockKind = BK_Block;
       parseBracedList();
@@ -1978,7 +1998,9 @@ LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
   for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
                                                     E = Line.Tokens.end();
        I != E; ++I) {
-    llvm::dbgs() << I->Tok->Tok.getName() << "[" << I->Tok->Type << "] ";
+    llvm::dbgs() << I->Tok->Tok.getName() << "["
+                 << "T=" << I->Tok->Type
+                 << ", OC=" << I->Tok->OriginalColumn << "] ";
   }
   for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
                                                     E = Line.Tokens.end();
@@ -2018,13 +2040,92 @@ bool UnwrappedLineParser::isOnNewLine(const FormatToken &FormatTok) {
          FormatTok.NewlinesBefore > 0;
 }
 
+static bool isLineComment(const FormatToken &FormatTok) {
+  return FormatTok.is(tok::comment) &&
+         FormatTok.TokenText.startswith("//");
+}
+
+// Checks if \p FormatTok is a line comment that continues the line comment
+// section on \p Line.
+static bool continuesLineComment(const FormatToken &FormatTok,
+                                 const UnwrappedLine &Line) {
+  if (Line.Tokens.empty())
+    return false;
+
+  // If Line starts with a line comment, then FormatTok continues the comment
+  // section if its original column is greater or equal to the original start
+  // column of the line.
+  //
+  // Define the min column token of a line as follows: if a line ends in '{' or
+  // contains a '{' followed by a line comment, then the min column token is
+  // that '{'. Otherwise, the min column token of the line is the first token of
+  // the line.
+  //
+  // If Line starts with a token other than a line comment, then FormatTok
+  // continues the comment section if its original column is greater than the
+  // original start column of the min column token of the line.
+  //
+  // For example, the second line comment continues the first in these cases:
+  // // first line
+  // // second line
+  // and:
+  // // first line
+  //  // second line
+  // and:
+  // int i; // first line
+  //  // second line
+  // and:
+  // do { // first line
+  //      // second line
+  //   int i;
+  // } while (true);
+  //
+  // The second line comment doesn't continue the first in these cases:
+  //   // first line
+  //  // second line
+  // and:
+  // int i; // first line
+  // // second line
+  // and:
+  // do { // first line
+  //   // second line
+  //   int i;
+  // } while (true);
+  const FormatToken *MinColumnToken = Line.Tokens.front().Tok;
+
+  // Scan for '{//'. If found, use the column of '{' as a min column for line
+  // comment section continuation.
+  const FormatToken *PreviousToken = nullptr;
+  for (const UnwrappedLineNode Node : Line.Tokens) {
+    if (PreviousToken && PreviousToken->is(tok::l_brace) &&
+        isLineComment(*Node.Tok)) {
+      MinColumnToken = PreviousToken;
+      break;
+    }
+    PreviousToken = Node.Tok;
+  }
+  if (PreviousToken && PreviousToken->is(tok::l_brace)) {
+    MinColumnToken = PreviousToken;
+  }
+
+  unsigned MinContinueColumn =
+      MinColumnToken->OriginalColumn +
+      (isLineComment(*MinColumnToken) ? 0 : 1);
+  return isLineComment(FormatTok) && FormatTok.NewlinesBefore == 1 &&
+         isLineComment(*(Line.Tokens.back().Tok)) &&
+         FormatTok.OriginalColumn >= MinContinueColumn;
+}
+
 void UnwrappedLineParser::flushComments(bool NewlineBeforeNext) {
   bool JustComments = Line->Tokens.empty();
   for (SmallVectorImpl<FormatToken *>::const_iterator
            I = CommentsBeforeNextToken.begin(),
            E = CommentsBeforeNextToken.end();
        I != E; ++I) {
-    if (isOnNewLine(**I) && JustComments)
+    // Line comments that belong to the same line comment section are put on the
+    // same line since later we might want to reflow content between them.
+    // See BreakableToken.
+    if (isOnNewLine(**I) && JustComments && !continuesLineComment(**I, *Line))
       addUnwrappedLine();
     pushToken(*I);
   }
@@ -2090,7 +2191,8 @@ void UnwrappedLineParser::readToken() {
 
     if (!FormatTok->Tok.is(tok::comment))
       return;
-    if (isOnNewLine(*FormatTok) || FormatTok->IsFirst) {
+    if (!continuesLineComment(*FormatTok, *Line) &&
+        (isOnNewLine(*FormatTok) || FormatTok->IsFirst)) {
       CommentsInCurrentLine = false;
     }
     if (CommentsInCurrentLine) {

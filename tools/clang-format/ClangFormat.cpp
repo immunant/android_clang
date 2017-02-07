@@ -20,9 +20,7 @@
 #include "clang/Basic/Version.h"
 #include "clang/Format/Format.h"
 #include "clang/Rewrite/Core/Rewriter.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Signals.h"
 
@@ -251,34 +249,40 @@ static bool format(StringRef FileName) {
   if (fillRanges(Code.get(), Ranges))
     return true;
   StringRef AssumedFileName = (FileName == "-") ? AssumeFileName : FileName;
-  FormatStyle FormatStyle = getStyle(Style, AssumedFileName, FallbackStyle);
+
+  llvm::Expected<FormatStyle> FormatStyle =
+      getStyle(Style, AssumedFileName, FallbackStyle, Code->getBuffer());
+  if (!FormatStyle) {
+    llvm::errs() << llvm::toString(FormatStyle.takeError()) << "\n";
+    return true;
+  }
+
   if (SortIncludes.getNumOccurrences() != 0)
-    FormatStyle.SortIncludes = SortIncludes;
+    FormatStyle->SortIncludes = SortIncludes;
   unsigned CursorPosition = Cursor;
-  Replacements Replaces = sortIncludes(FormatStyle, Code->getBuffer(), Ranges,
+  Replacements Replaces = sortIncludes(*FormatStyle, Code->getBuffer(), Ranges,
                                        AssumedFileName, &CursorPosition);
   auto ChangedCode = tooling::applyAllReplacements(Code->getBuffer(), Replaces);
   if (!ChangedCode) {
     llvm::errs() << llvm::toString(ChangedCode.takeError()) << "\n";
     return true;
   }
-  for (const auto &R : Replaces)
-    Ranges.push_back({R.getOffset(), R.getLength()});
-
+  // Get new affected ranges after sorting `#includes`.
+  Ranges = tooling::calculateRangesAfterReplacements(Replaces, Ranges);
   bool IncompleteFormat = false;
-  Replacements FormatChanges = reformat(FormatStyle, *ChangedCode, Ranges,
+  Replacements FormatChanges = reformat(*FormatStyle, *ChangedCode, Ranges,
                                         AssumedFileName, &IncompleteFormat);
-  Replaces = tooling::mergeReplacements(Replaces, FormatChanges);
+  Replaces = Replaces.merge(FormatChanges);
   if (OutputXML) {
     outs() << "<?xml version='1.0'?>\n<replacements "
               "xml:space='preserve' incomplete_format='"
            << (IncompleteFormat ? "true" : "false") << "'>\n";
     if (Cursor.getNumOccurrences() != 0)
       outs() << "<cursor>"
-             << tooling::shiftedCodePosition(FormatChanges, CursorPosition)
+             << FormatChanges.getShiftedCodePosition(CursorPosition)
              << "</cursor>\n";
 
-    outputReplacementsXML(Replaces); 
+    outputReplacementsXML(Replaces);
     outs() << "</replacements>\n";
   } else {
     IntrusiveRefCntPtr<vfs::InMemoryFileSystem> InMemoryFileSystem(
@@ -300,7 +304,7 @@ static bool format(StringRef FileName) {
     } else {
       if (Cursor.getNumOccurrences() != 0)
         outs() << "{ \"Cursor\": "
-               << tooling::shiftedCodePosition(FormatChanges, CursorPosition)
+               << FormatChanges.getShiftedCodePosition(CursorPosition)
                << ", \"IncompleteFormat\": "
                << (IncompleteFormat ? "true" : "false") << " }\n";
       Rewrite.getEditBuffer(ID).write(outs());
@@ -336,10 +340,15 @@ int main(int argc, const char **argv) {
     cl::PrintHelpMessage();
 
   if (DumpConfig) {
-    std::string Config =
-        clang::format::configurationAsText(clang::format::getStyle(
+    llvm::Expected<clang::format::FormatStyle> FormatStyle =
+        clang::format::getStyle(
             Style, FileNames.empty() ? AssumeFileName : FileNames[0],
-            FallbackStyle));
+            FallbackStyle);
+    if (!FormatStyle) {
+      llvm::errs() << llvm::toString(FormatStyle.takeError()) << "\n";
+      return 1;
+    }
+    std::string Config = clang::format::configurationAsText(*FormatStyle);
     outs() << Config << "\n";
     return 0;
   }

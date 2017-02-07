@@ -3,7 +3,7 @@
 @import DependsOnModule;
 int glob;
 
-// RUN: rm -rf %t.cache
+// RUN: rm -rf %t.cache %t.cache.sys
 // RUN: c-index-test -index-file %s -fmodules-cache-path=%t.cache -fmodules -F %S/../Modules/Inputs \
 // RUN:      -Xclang -fdisable-module-hash | FileCheck %s
 // RUN: c-index-test -index-file %s -fmodules-cache-path=%t.cache.sys -fmodules -iframework %S/../Modules/Inputs \
@@ -52,7 +52,7 @@ int glob;
 // CHECK-TMOD-NEXT: [indexDeclaration]: kind: objc-class | name: Module | {{.*}} | loc: [[TMOD_MODULE_H]]:15:12
 // CHECK-TMOD-NEXT:      <ObjCContainerInfo>: kind: interface
 // CHECK-TMOD-NEXT: [indexDeclaration]: kind: objc-class-method | name: version | {{.*}} | loc: [[TMOD_MODULE_H]]:16:1
-// CHECK-TMOD-NEXT: [indexDeclaration]: kind: objc-class-method | name: alloc | {{.*}} | loc: [[TMOD_MODULE_H]]:17:1
+// CHECK-TMOD-NEXT: [indexDeclaration]: kind: objc-class-method | name: alloc | {{.*}} | loc: [[TMOD_MODULE_H]]:17:2
 // CHECK-TMOD-NEXT: [indexDeclaration]: kind: typedef | name: FILE | {{.*}} | loc: [[TMOD_MODULE_H]]:30:3
 // CHECK-TMOD-NEXT: [indexDeclaration]: kind: struct | name: __sFILE | {{.*}} | loc: [[TMOD_MODULE_H]]:28:16
 // CHECK-TMOD-NEXT: [indexDeclaration]: kind: field | name: _offset | {{.*}} | loc: [[TMOD_MODULE_H]]:29:7

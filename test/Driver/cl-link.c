@@ -22,8 +22,9 @@
 // ASAN-MD: "-debug"
 // ASAN-MD: "-incremental:no"
 // ASAN-MD: "{{.*}}clang_rt.asan_dynamic-i386.lib"
-// ASAN-MD: "{{.*}}clang_rt.asan_dynamic_runtime_thunk-i386.lib"
+// ASAN-MD: "{{[^"]*}}clang_rt.asan_dynamic_runtime_thunk-i386.lib"
 // ASAN-MD: "-include:___asan_seh_interceptor"
+// ASAN-MD: "-wholearchive:{{.*}}clang_rt.asan_dynamic_runtime_thunk-i386.lib"
 // ASAN-MD: "{{.*}}cl-link{{.*}}.obj"
 
 // RUN: %clang_cl /LD -### /Tc%s 2>&1 | FileCheck --check-prefix=DLL %s
@@ -51,3 +52,6 @@
 // NONEXISTENT: link.exe
 // NONEXISTENT: "/libpath:somepath"
 // NONEXISTENT: nonexistent
+
+// RUN: %clang_cl /Tc%s -fuse-ld=lld -### 2>&1 | FileCheck --check-prefix=USE_LLD %s
+// USE_LLD: lld-link.exe

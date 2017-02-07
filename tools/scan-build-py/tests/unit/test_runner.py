@@ -150,7 +150,6 @@ class RunAnalyzerTest(unittest.TestCase):
     def test_run_analyzer_crash_and_forwarded(self):
         content = "int div(int n, int d) { return n / d }"
         (_, fwds) = RunAnalyzerTest.run_analyzer(content, True)
-        self.assertEqual('crash', fwds['error_type'])
         self.assertEqual(1, fwds['exit_code'])
         self.assertTrue(len(fwds['error_output']) > 0)
 
@@ -218,20 +217,6 @@ class AnalyzerTest(unittest.TestCase):
         self.assertEqual(['-UNDEBUG'], test([]))
         self.assertEqual(['-DNDEBUG', '-UNDEBUG'], test(['-DNDEBUG']))
         self.assertEqual(['-DSomething', '-UNDEBUG'], test(['-DSomething']))
-
-    def test_set_file_relative_path(self):
-        def test(expected, input):
-            spy = Spy()
-            self.assertEqual(spy.success,
-                             sut.set_file_path_relative(input, spy.call))
-            self.assertEqual(expected, spy.arg['file'])
-
-        test('source.c',
-             {'file': '/home/me/source.c', 'directory': '/home/me'})
-        test('me/source.c',
-             {'file': '/home/me/source.c', 'directory': '/home'})
-        test('../home/me/source.c',
-             {'file': '/home/me/source.c', 'directory': '/tmp'})
 
     def test_set_language_fall_through(self):
         def language(expected, input):

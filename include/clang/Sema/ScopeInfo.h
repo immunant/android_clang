@@ -106,10 +106,14 @@ public:
   bool HasDroppedStmt : 1;
 
   /// \brief True if current scope is for OpenMP declare reduction combiner.
-  bool HasOMPDeclareReductionCombiner;
+  bool HasOMPDeclareReductionCombiner : 1;
 
   /// \brief Whether there is a fallthrough statement in this function.
   bool HasFallthroughStmt : 1;
+
+  /// \brief Whether we make reference to a declaration that could be
+  /// unavailable.
+  bool HasPotentialAvailabilityViolations : 1;
 
   /// A flag that is set when parsing a method that must call super's
   /// implementation, such as \c -dealloc, \c -finalize, or any method marked
@@ -381,6 +385,7 @@ public:
       HasDroppedStmt(false),
       HasOMPDeclareReductionCombiner(false),
       HasFallthroughStmt(false),
+      HasPotentialAvailabilityViolations(false),
       ObjCShouldCallSuper(false),
       ObjCIsDesignatedInit(false),
       ObjCWarnForNoDesignatedInitChain(false),
@@ -447,6 +452,14 @@ public:
     /// non-static data member that would hold the capture.
     QualType CaptureType;
 
+    /// \brief Whether an explicit capture has been odr-used in the body of the
+    /// lambda.
+    bool ODRUsed;
+
+    /// \brief Whether an explicit capture has been non-odr-used in the body of
+    /// the lambda.
+    bool NonODRUsed;
+
   public:
     Capture(VarDecl *Var, bool Block, bool ByRef, bool IsNested,
             SourceLocation Loc, SourceLocation EllipsisLoc,
@@ -455,7 +468,8 @@ public:
           InitExprAndCaptureKind(
               Cpy, !Var ? Cap_VLA : Block ? Cap_Block : ByRef ? Cap_ByRef
                                                               : Cap_ByCopy),
-          Loc(Loc), EllipsisLoc(EllipsisLoc), CaptureType(CaptureType) {}
+          Loc(Loc), EllipsisLoc(EllipsisLoc), CaptureType(CaptureType),
+          ODRUsed(false), NonODRUsed(false) {}
 
     enum IsThisCapture { ThisCapture };
     Capture(IsThisCapture, bool IsNested, SourceLocation Loc,
@@ -463,7 +477,8 @@ public:
         : VarAndNestedAndThis(
               nullptr, (IsThisCaptured | (IsNested ? IsNestedCapture : 0))),
           InitExprAndCaptureKind(Cpy, ByCopy ? Cap_ByCopy : Cap_ByRef),
-          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType) {}
+          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType), ODRUsed(false),
+          NonODRUsed(false) {}
 
     bool isThisCapture() const {
       return VarAndNestedAndThis.getInt() & IsThisCaptured;
@@ -486,6 +501,9 @@ public:
     bool isNested() const {
       return VarAndNestedAndThis.getInt() & IsNestedCapture;
     }
+    bool isODRUsed() const { return ODRUsed; }
+    bool isNonODRUsed() const { return NonODRUsed; }
+    void markUsed(bool IsODRUse) { (IsODRUse ? ODRUsed : NonODRUsed) = true; }
 
     VarDecl *getVariable() const {
       return VarAndNestedAndThis.getPointer();
@@ -730,7 +748,16 @@ public:
   ///  to local variables that are usable as constant expressions and
   ///  do not involve an odr-use (they may still need to be captured
   ///  if the enclosing full-expression is instantiation dependent).
-  llvm::SmallSet<Expr*, 8> NonODRUsedCapturingExprs; 
+  llvm::SmallSet<Expr *, 8> NonODRUsedCapturingExprs;
+
+  /// Contains all of the variables defined in this lambda that shadow variables
+  /// that were defined in parent contexts. Used to avoid warnings when the
+  /// shadowed variables are uncaptured by this lambda.
+  struct ShadowedOuterDecl {
+    const VarDecl *VD;
+    const VarDecl *ShadowedDecl;
+  };
+  llvm::SmallVector<ShadowedOuterDecl, 4> ShadowingDecls;
 
   SourceLocation PotentialThisCaptureLocation;
 
