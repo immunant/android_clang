@@ -847,7 +847,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
       break;
   }
 
-  bool ROPI = false, RWPI = false;
+  bool ROPI = false, RWPI = false, PIP = false;
   Arg* LastROPIArg = Args.getLastArg(options::OPT_fropi, options::OPT_fno_ropi);
   if (LastROPIArg && LastROPIArg->getOption().matches(options::OPT_fropi)) {
     if (!EmbeddedPISupported)
@@ -862,6 +862,13 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
           << LastRWPIArg->getSpelling() << Triple.str();
     RWPI = true;
   }
+  Arg *LastPIPArg = Args.getLastArg(options::OPT_fpip, options::OPT_fno_pip);
+  if (LastPIPArg && LastPIPArg->getOption().matches(options::OPT_fpip)) {
+    if (!EmbeddedPISupported)
+      ToolChain.getDriver().Diag(diag::err_drv_unsupported_opt_for_target)
+          << LastPIPArg->getSpelling() << Triple.str();
+    PIP = true;
+  }
 
   // ROPI and RWPI are not comaptible with PIC or PIE.
   if ((ROPI || RWPI) && (PIC || PIE))
@@ -873,6 +880,9 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
        Triple.getArch() == llvm::Triple::mips64el) &&
       Args.hasArg(options::OPT_mno_abicalls))
     return std::make_tuple(llvm::Reloc::Static, 0U, false);
+
+  if (PIP)
+    return std::make_tuple(llvm::Reloc::PIP, IsPICLevelTwo ? 2U : 1U, PIE);
 
   if (PIC)
     return std::make_tuple(llvm::Reloc::PIC_, IsPICLevelTwo ? 2U : 1U, PIE);

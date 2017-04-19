@@ -332,6 +332,7 @@ static llvm::Reloc::Model getRelocModel(const CodeGenOptions &CodeGenOpts) {
       .Case("ropi", llvm::Reloc::ROPI)
       .Case("rwpi", llvm::Reloc::RWPI)
       .Case("ropi-rwpi", llvm::Reloc::ROPI_RWPI)
+      .Case("pip", llvm::Reloc::PIP)
       .Case("dynamic-no-pic", llvm::Reloc::DynamicNoPIC);
   assert(RM.hasValue() && "invalid PIC model!");
   return *RM;
