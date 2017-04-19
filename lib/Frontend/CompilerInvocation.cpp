@@ -334,7 +334,8 @@ static StringRef getRelocModel(ArgList &Args, DiagnosticsEngine &Diags) {
   if (Arg *A = Args.getLastArg(OPT_mrelocation_model)) {
     StringRef Value = A->getValue();
     if (Value == "static" || Value == "pic" || Value == "ropi" ||
-        Value == "rwpi" || Value == "ropi-rwpi" || Value == "dynamic-no-pic")
+        Value == "rwpi" || Value == "ropi-rwpi" || Value == "dynamic-no-pic" ||
+        Value == "pip")
       return Value;
     Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args) << Value;
   }

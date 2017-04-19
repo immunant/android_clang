@@ -1296,6 +1296,8 @@ def fropi : Flag<["-"], "fropi">, Group<f_Group>;
 def fno_ropi : Flag<["-"], "fno-ropi">, Group<f_Group>;
 def frwpi : Flag<["-"], "frwpi">, Group<f_Group>;
 def fno_rwpi : Flag<["-"], "fno-rwpi">, Group<f_Group>;
+def fpip : Flag<["-"], "fpip">, Group<f_Group>;
+def fno_pip : Flag<["-"], "fno-pip">, Group<f_Group>;
 def fplugin_EQ : Joined<["-"], "fplugin=">, Group<f_Group>, Flags<[DriverOption]>, MetaVarName<"<dsopath>">,
   HelpText<"Load the named plugin (dynamic shared object)">;
 def fpreserve_as_comments : Flag<["-"], "fpreserve-as-comments">, Group<f_Group>;

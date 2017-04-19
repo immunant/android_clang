@@ -908,6 +908,8 @@ static const char *RelocationModelName(llvm::Reloc::Model Model) {
     return "rwpi";
   case llvm::Reloc::ROPI_RWPI:
     return "ropi-rwpi";
+  case llvm::Reloc::PIP:
+    return "pip";
   }
   llvm_unreachable("Unknown Reloc::Model kind");
 }
