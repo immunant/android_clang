@@ -864,7 +864,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   }
   Arg *LastPIPArg = Args.getLastArg(options::OPT_fpip, options::OPT_fno_pip);
   if (LastPIPArg && LastPIPArg->getOption().matches(options::OPT_fpip)) {
-    if (!EmbeddedPISupported)
+    if (!EmbeddedPISupported && Triple.getArch() != llvm::Triple::aarch64)
       ToolChain.getDriver().Diag(diag::err_drv_unsupported_opt_for_target)
           << LastPIPArg->getSpelling() << Triple.str();
     PIP = true;
