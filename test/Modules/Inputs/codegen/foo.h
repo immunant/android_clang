@@ -1,10 +1,30 @@
-void f1(int &);
-static void f2() {}
-inline void foo() {
-  static int i;
-  f1(i);
-  f2();
+inline void f1(const char* fmt, ...) {
+  __builtin_va_list args;
+  __builtin_va_start(args, fmt);
 }
-inline void foo2() {
+
+struct non_trivial_dtor {
+  ~non_trivial_dtor();
+};
+
+struct implicit_dtor {
+  non_trivial_dtor d;
+};
+
+struct uninst_implicit_dtor {
+  non_trivial_dtor d;
+};
+
+inline void use_implicit_dtor() {
+  implicit_dtor d;
 }
-void foo_ext() {}
+
+template <typename T>
+void inst() {
+}
+
+inline void inst_decl() {
+  // cause inst<int>'s declaration to be instantiated, without a definition.
+  (void)sizeof(&inst<int>);
+  inst<float>();
+}
