@@ -1229,6 +1229,7 @@ ASTDeclReader::RedeclarableResult ASTDeclReader::VisitVarDeclImpl(VarDecl *VD) {
     VD->NonParmVarDeclBits.IsConstexpr = Record.readInt();
     VD->NonParmVarDeclBits.IsInitCapture = Record.readInt();
     VD->NonParmVarDeclBits.PreviousDeclInSameBlockScope = Record.readInt();
+    VD->NonParmVarDeclBits.ImplicitParamKind = Record.readInt();
   }
   Linkage VarLinkage = Linkage(Record.readInt());
   VD->setCachedLinkage(VarLinkage);
@@ -3612,7 +3613,8 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
   assert(Record.getIdx() == Record.size());
 
   // Load any relevant update records.
-  PendingUpdateRecords.push_back(std::make_pair(ID, D));
+  PendingUpdateRecords.push_back(
+      PendingUpdateRecord(ID, D, /*JustLoaded=*/true));
 
   // Load the categories after recursive loading is finished.
   if (ObjCInterfaceDecl *Class = dyn_cast<ObjCInterfaceDecl>(D))
@@ -3626,23 +3628,55 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
   // AST consumer might need to know about, queue it.
   // We don't pass it to the consumer immediately because we may be in recursive
   // loading, and some declarations may still be initializing.
-  if (isConsumerInterestedIn(Context, D, Reader.hasPendingBody()))
-    InterestingDecls.push_back(D);
+  PotentiallyInterestingDecls.push_back(
+      InterestingDecl(D, Reader.hasPendingBody()));
 
   return D;
 }
 
-void ASTReader::loadDeclUpdateRecords(serialization::DeclID ID, Decl *D) {
+void ASTReader::PassInterestingDeclsToConsumer() {
+  assert(Consumer);
+
+  if (PassingDeclsToConsumer)
+    return;
+
+  // Guard variable to avoid recursively redoing the process of passing
+  // decls to consumer.
+  SaveAndRestore<bool> GuardPassingDeclsToConsumer(PassingDeclsToConsumer,
+                                                   true);
+
+  // Ensure that we've loaded all potentially-interesting declarations
+  // that need to be eagerly loaded.
+  for (auto ID : EagerlyDeserializedDecls)
+    GetDecl(ID);
+  EagerlyDeserializedDecls.clear();
+
+  while (!PotentiallyInterestingDecls.empty()) {
+    InterestingDecl D = PotentiallyInterestingDecls.front();
+    PotentiallyInterestingDecls.pop_front();
+    if (isConsumerInterestedIn(Context, D.getDecl(), D.hasPendingBody()))
+      PassInterestingDeclToConsumer(D.getDecl());
+  }
+}
+
+void ASTReader::loadDeclUpdateRecords(PendingUpdateRecord &Record) {
   // The declaration may have been modified by files later in the chain.
   // If this is the case, read the record containing the updates from each file
   // and pass it to ASTDeclReader to make the modifications.
+  serialization::GlobalDeclID ID = Record.ID;
+  Decl *D = Record.D;
   ProcessingUpdatesRAIIObj ProcessingUpdates(*this);
   DeclUpdateOffsetsMap::iterator UpdI = DeclUpdateOffsets.find(ID);
   if (UpdI != DeclUpdateOffsets.end()) {
     auto UpdateOffsets = std::move(UpdI->second);
     DeclUpdateOffsets.erase(UpdI);
 
-    bool WasInteresting = isConsumerInterestedIn(Context, D, false);
+    // Check if this decl was interesting to the consumer. If we just loaded
+    // the declaration, then we know it was interesting and we skip the call
+    // to isConsumerInterestedIn because it is unsafe to call in the
+    // current ASTReader state.
+    bool WasInteresting =
+        Record.JustLoaded || isConsumerInterestedIn(Context, D, false);
     for (auto &FileAndOffset : UpdateOffsets) {
       ModuleFile *F = FileAndOffset.first;
       uint64_t Offset = FileAndOffset.second;
@@ -3663,7 +3697,8 @@ void ASTReader::loadDeclUpdateRecords(serialization::DeclID ID, Decl *D) {
       // we need to hand it off to the consumer.
       if (!WasInteresting &&
           isConsumerInterestedIn(Context, D, Reader.hasPendingBody())) {
-        InterestingDecls.push_back(D);
+        PotentiallyInterestingDecls.push_back(
+            InterestingDecl(D, Reader.hasPendingBody()));
         WasInteresting = true;
       }
     }

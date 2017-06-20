@@ -32,7 +32,7 @@ namespace clang {
       DIAG_START_FRONTEND      = DIAG_START_DRIVER          +  200,
       DIAG_START_SERIALIZATION = DIAG_START_FRONTEND        +  100,
       DIAG_START_LEX           = DIAG_START_SERIALIZATION   +  120,
-      DIAG_START_PARSE         = DIAG_START_LEX             +  300,
+      DIAG_START_PARSE         = DIAG_START_LEX             +  400,
       DIAG_START_AST           = DIAG_START_PARSE           +  500,
       DIAG_START_COMMENT       = DIAG_START_AST             +  110,
       DIAG_START_SEMA          = DIAG_START_COMMENT         +  100,
@@ -122,15 +122,21 @@ public:
   bool wasUpgradedFromWarning() const { return WasUpgradedFromWarning; }
   void setUpgradedFromWarning(bool Value) { WasUpgradedFromWarning = Value; }
 
-  /// Serialize the bits that aren't based on context.
-  unsigned serializeBits() const {
-    return (WasUpgradedFromWarning << 3) | Severity;
+  /// Serialize this mapping as a raw integer.
+  unsigned serialize() const {
+    return (IsUser << 7) | (IsPragma << 6) | (HasNoWarningAsError << 5) |
+           (HasNoErrorAsFatal << 4) | (WasUpgradedFromWarning << 3) | Severity;
   }
-  static diag::Severity deserializeSeverity(unsigned Bits) {
-    return (diag::Severity)(Bits & 0x7);
-  }
-  static bool deserializeUpgradedFromWarning(unsigned Bits) {
-    return Bits >> 3;
+  /// Deserialize a mapping.
+  static DiagnosticMapping deserialize(unsigned Bits) {
+    DiagnosticMapping Result;
+    Result.IsUser = (Bits >> 7) & 1;
+    Result.IsPragma = (Bits >> 6) & 1;
+    Result.HasNoWarningAsError = (Bits >> 5) & 1;
+    Result.HasNoErrorAsFatal = (Bits >> 4) & 1;
+    Result.WasUpgradedFromWarning = (Bits >> 3) & 1;
+    Result.Severity = Bits & 0x7;
+    return Result;
   }
 };
 
