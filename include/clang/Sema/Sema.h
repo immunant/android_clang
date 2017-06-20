@@ -2705,8 +2705,7 @@ public:
   resolveAddressOfOnlyViableOverloadCandidate(Expr *E,
                                               DeclAccessPair &FoundResult);
 
-  bool resolveAndFixAddressOfOnlyViableOverloadCandidate(
-      ExprResult &SrcExpr, bool DoFunctionPointerConversion = false);
+  bool resolveAndFixAddressOfOnlyViableOverloadCandidate(ExprResult &SrcExpr);
 
   FunctionDecl *
   ResolveSingleFunctionTemplateSpecialization(OverloadExpr *ovl,
