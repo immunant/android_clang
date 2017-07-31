@@ -255,6 +255,9 @@ def warn_slash_u_filename : Warning<"'/U%0' treated as the '/U' option">,
   InGroup<DiagGroup<"slash-u-filename">>;
 def note_use_dashdash : Note<"Use '--' to treat subsequent arguments as filenames">;
 
+def err_drv_pagerando_incompatible_with_separate_sections : Error<
+  "Pagerando and separate sections ('-ffunction-sections', '-fdata-sections') are incompatible">;
+
 def err_drv_ropi_rwpi_incompatible_with_pic : Error<
   "embedded and GOT-based position independence are incompatible">;
 def err_drv_ropi_incompatible_with_cxx : Error<

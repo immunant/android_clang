@@ -877,10 +877,9 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   bool DataSection = Args.hasFlag(options::OPT_fdata_sections,
                                   options::OPT_fno_data_sections,
                                   UseSeparateSections);
-  if (PIP && (FunctionSections || DataSection)) {
-    ToolChain.getDriver().Diag(diag::err_drv_argument_not_allowed_with)
-        << LastPIPArg->getSpelling() << "separate function or data sections";
-  }
+  if (PIP && (FunctionSections || DataSection))
+    ToolChain.getDriver().Diag(
+        diag::err_drv_pagerando_incompatible_with_separate_sections);
 
   // ROPI and RWPI are not comaptible with PIC or PIE.
   if ((ROPI || RWPI) && (PIC || PIE))
