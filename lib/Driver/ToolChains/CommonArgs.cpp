@@ -880,6 +880,8 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   if (PIP && (FunctionSections || DataSection))
     ToolChain.getDriver().Diag(
         diag::err_drv_pagerando_incompatible_with_separate_sections);
+  if (PIP && !ToolChain.getDriver().isUsingLTO())
+    ToolChain.getDriver().Diag(diag::err_drv_pagerando_requires_lto);
 
   // ROPI and RWPI are not comaptible with PIC or PIE.
   if ((ROPI || RWPI) && (PIC || PIE))

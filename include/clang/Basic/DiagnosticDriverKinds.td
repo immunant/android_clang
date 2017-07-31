@@ -257,6 +257,8 @@ def note_use_dashdash : Note<"Use '--' to treat subsequent arguments as filename
 
 def err_drv_pagerando_incompatible_with_separate_sections : Error<
   "Pagerando and separate sections ('-ffunction-sections', '-fdata-sections') are incompatible">;
+def err_drv_pagerando_requires_lto : Error<
+  "Pagerando requires link time optimization ('-flto')">;
 
 def err_drv_ropi_rwpi_incompatible_with_pic : Error<
   "embedded and GOT-based position independence are incompatible">;
