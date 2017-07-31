@@ -870,6 +870,18 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     PIP = true;
   }
 
+  bool UseSeparateSections = isUseSeparateSections(Triple);
+  bool FunctionSections = Args.hasFlag(options::OPT_ffunction_sections,
+                                       options::OPT_fno_function_sections,
+                                       UseSeparateSections);
+  bool DataSection = Args.hasFlag(options::OPT_fdata_sections,
+                                  options::OPT_fno_data_sections,
+                                  UseSeparateSections);
+  if (PIP && (FunctionSections || DataSection)) {
+    ToolChain.getDriver().Diag(diag::err_drv_argument_not_allowed_with)
+        << LastPIPArg->getSpelling() << "separate function or data sections";
+  }
+
   // ROPI and RWPI are not comaptible with PIC or PIE.
   if ((ROPI || RWPI) && (PIC || PIE))
     ToolChain.getDriver().Diag(diag::err_drv_ropi_rwpi_incompatible_with_pic);
