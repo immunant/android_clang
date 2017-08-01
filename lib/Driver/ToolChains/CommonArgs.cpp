@@ -871,7 +871,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   }
 
   // Pagerando and '-ffunction-sections'/'-fdata-sections' are incompatible
-  bool UseSeparateSections = isUseSeparateSections(Triple);
+  bool UseSeparateSections = isUseSeparateSections(EffectiveTriple);
   bool FunctionSections = Args.hasFlag(options::OPT_ffunction_sections,
                                        options::OPT_fno_function_sections,
                                        UseSeparateSections);
