@@ -882,7 +882,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     ToolChain.getDriver().Diag(
         diag::err_drv_pagerando_incompatible_with_separate_sections);
   // Pagerando requires '-flto'
-  if (PIP && !ToolChain.getDriver().isUsingLTO())
+  if (PIP && ToolChain.getDriver().getLTOMode() != LTOK_Full)
     ToolChain.getDriver().Diag(diag::err_drv_pagerando_requires_lto);
 
   // ROPI and RWPI are not comaptible with PIC or PIE.
