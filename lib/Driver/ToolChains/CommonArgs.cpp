@@ -870,6 +870,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     PIP = true;
   }
 
+  // Pagerando and '-ffunction-sections'/'-fdata-sections' are incompatible
   bool UseSeparateSections = isUseSeparateSections(Triple);
   bool FunctionSections = Args.hasFlag(options::OPT_ffunction_sections,
                                        options::OPT_fno_function_sections,
@@ -880,6 +881,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   if (PIP && (FunctionSections || DataSection))
     ToolChain.getDriver().Diag(
         diag::err_drv_pagerando_incompatible_with_separate_sections);
+  // Pagerando requires '-flto'
   if (PIP && !ToolChain.getDriver().isUsingLTO())
     ToolChain.getDriver().Diag(diag::err_drv_pagerando_requires_lto);
 
