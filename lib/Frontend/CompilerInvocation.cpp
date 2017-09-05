@@ -387,6 +387,7 @@ static llvm::Reloc::Model getRelocModel(ArgList &Args,
                   .Case("rwpi", llvm::Reloc::RWPI)
                   .Case("ropi-rwpi", llvm::Reloc::ROPI_RWPI)
                   .Case("dynamic-no-pic", llvm::Reloc::DynamicNoPIC)
+                  .Case("pip", llvm::Reloc::PIP)
                   .Default(None);
     if (RM.hasValue())
       return *RM;
