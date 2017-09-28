@@ -4954,6 +4954,10 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   std::tie(RelocationModel, PICLevel, IsPIE) =
       ParsePICArgs(getToolChain(), Args);
 
+  // Integrated assembler should treat PIP as PIC_
+  if (RelocationModel == llvm::Reloc::PIP)
+    RelocationModel = llvm::Reloc::PIC_;
+
   const char *RMName = RelocationModelName(RelocationModel);
   if (RMName) {
     CmdArgs.push_back("-mrelocation-model");
