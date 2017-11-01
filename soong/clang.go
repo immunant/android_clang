@@ -17,6 +17,8 @@ package clang
 import (
 	"android/soong/android"
 	"android/soong/cc"
+
+	"github.com/google/blueprint/proptools"
 )
 
 // Clang binaries (clang, clang-check, clang-format) need to be compiled for both 32-bit and 64-bit,
@@ -33,7 +35,7 @@ func clangForceBuildLlvmComponents(ctx android.LoadHookContext) {
 		type props struct {
 			Target struct {
 				Host struct {
-					Compile_multilib string
+					Compile_multilib *string
 				}
 				Not_windows struct {
 					Cflags []string
@@ -47,7 +49,7 @@ func clangForceBuildLlvmComponents(ctx android.LoadHookContext) {
 			}
 		}
 		p := &props{}
-		p.Target.Host.Compile_multilib = "both"
+		p.Target.Host.Compile_multilib = proptools.StringPtr("both")
 		p.Multilib.Lib32.Suffix = "_32"
 
 		if ctx.AConfig().IsEnvTrue("FORCE_BUILD_LLVM_PROFILE_GENERATE") {
