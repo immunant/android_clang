@@ -357,20 +357,8 @@ void tools::AddGoldPlugin(const ToolChain &ToolChain, const ArgList &Args,
   // as gold requires -plugin to come before any -plugin-opt that -Wl might
   // forward.
   CmdArgs.push_back("-plugin");
-
-#if defined(LLVM_ON_WIN32)
-  const char *Suffix = ".dll";
-#elif defined(__APPLE__)
-  const char *Suffix = ".dylib";
-#else
-  const char *Suffix = ".so";
-#endif
-
-  SmallString<1024> Plugin;
-  llvm::sys::path::native(Twine(ToolChain.getDriver().Dir) +
-                              "/../lib" CLANG_LIBDIR_SUFFIX "/LLVMgold" +
-                              Suffix,
-                          Plugin);
+  std::string Plugin =
+      ToolChain.getDriver().Dir + "/../lib" CLANG_LIBDIR_SUFFIX "/LLVMgold.so";
   CmdArgs.push_back(Args.MakeArgString(Plugin));
 
   // Try to pass driver level flags relevant to LTO code generation down to
@@ -592,12 +580,10 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
 static void addLibFuzzerRuntime(const ToolChain &TC,
                                 const ArgList &Args,
                                 ArgStringList &CmdArgs) {
-  StringRef ParentDir =
-      llvm::sys::path::parent_path(TC.getDriver().InstalledDir);
-  SmallString<128> P(ParentDir);
-  llvm::sys::path::append(P, "lib", "libLLVMFuzzer.a");
-  CmdArgs.push_back(Args.MakeArgString(P));
-  if (!Args.hasArg(clang::driver::options::OPT_nostdlibxx))
+    StringRef ParentDir = llvm::sys::path::parent_path(TC.getDriver().InstalledDir);
+    SmallString<128> P(ParentDir);
+    llvm::sys::path::append(P, "lib", "libLLVMFuzzer.a");
+    CmdArgs.push_back(Args.MakeArgString(P));
     TC.AddCXXStdlibLibArgs(Args, CmdArgs);
 }
 

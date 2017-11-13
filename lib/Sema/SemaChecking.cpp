@@ -9935,28 +9935,6 @@ void Sema::CheckBoolLikeConversion(Expr *E, SourceLocation CC) {
   ::CheckBoolLikeConversion(*this, E, CC);
 }
 
-/// Diagnose when expression is an integer constant expression and its evaluation
-/// results in integer overflow
-void Sema::CheckForIntOverflow (Expr *E) {
-  // Use a work list to deal with nested struct initializers.
-  SmallVector<Expr *, 2> Exprs(1, E);
-
-  do {
-    Expr *E = Exprs.pop_back_val();
-
-    if (isa<BinaryOperator>(E->IgnoreParenCasts())) {
-      E->IgnoreParenCasts()->EvaluateForOverflow(Context);
-      continue;
-    }
-
-    if (auto InitList = dyn_cast<InitListExpr>(E))
-      Exprs.append(InitList->inits().begin(), InitList->inits().end());
-
-    if (isa<ObjCBoxedExpr>(E))
-      E->IgnoreParenCasts()->EvaluateForOverflow(Context);
-  } while (!Exprs.empty());
-}
-
 namespace {
 /// \brief Visitor for expressions which looks for unsequenced operations on the
 /// same object.
@@ -10458,7 +10436,7 @@ void Sema::CheckCompletedExpr(Expr *E, SourceLocation CheckLoc,
   if (!E->isInstantiationDependent())
     CheckUnsequencedOperations(E);
   if (!IsConstexpr && !E->isValueDependent())
-    CheckForIntOverflow(E);
+    E->EvaluateForOverflow(Context);
   DiagnoseMisalignedMembers();
 }
 
@@ -12093,8 +12071,6 @@ void Sema::RefersToMemberWithReducedAlignment(
     if (ME->isArrow())
       BaseType = BaseType->getPointeeType();
     RecordDecl *RD = BaseType->getAs<RecordType>()->getDecl();
-    if (RD->isInvalidDecl())
-      return;
 
     ValueDecl *MD = ME->getMemberDecl();
     auto *FD = dyn_cast<FieldDecl>(MD);

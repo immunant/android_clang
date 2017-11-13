@@ -887,10 +887,8 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   if (CGM.getCodeGenOpts().InstrumentForProfiling) {
     if (CGM.getCodeGenOpts().CallFEntry)
       Fn->addFnAttr("fentry-call", "true");
-    else {
-      if (!CurFuncDecl || !CurFuncDecl->hasAttr<NoInstrumentFunctionAttr>())
-        Fn->addFnAttr("counting-function", getTarget().getMCountName());
-    }
+    else
+      Fn->addFnAttr("counting-function", getTarget().getMCountName());
   }
 
   if (RetTy->isVoidType()) {
