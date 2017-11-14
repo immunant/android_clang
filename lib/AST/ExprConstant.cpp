@@ -537,7 +537,7 @@ namespace {
   /// rules.  For example, the RHS of (0 && foo()) is not evaluated.  We can
   /// evaluate the expression regardless of what the RHS is, but C only allows
   /// certain things in certain situations.
-  struct LLVM_ALIGNAS(/*alignof(uint64_t)*/ 8) EvalInfo {
+  struct EvalInfo {
     ASTContext &Ctx;
 
     /// EvalStatus - Contains information about the evaluation.
@@ -572,6 +572,31 @@ namespace {
     /// EvaluatingDeclValue - This is the value being constructed for the
     /// declaration whose initializer is being evaluated, if any.
     APValue *EvaluatingDeclValue;
+
+    /// EvaluatingObject - Pair of the AST node that an lvalue represents and
+    /// the call index that that lvalue was allocated in.
+    typedef std::pair<APValue::LValueBase, unsigned> EvaluatingObject;
+
+    /// EvaluatingConstructors - Set of objects that are currently being
+    /// constructed.
+    llvm::DenseSet<EvaluatingObject> EvaluatingConstructors;
+
+    struct EvaluatingConstructorRAII {
+      EvalInfo &EI;
+      EvaluatingObject Object;
+      bool DidInsert;
+      EvaluatingConstructorRAII(EvalInfo &EI, EvaluatingObject Object)
+          : EI(EI), Object(Object) {
+        DidInsert = EI.EvaluatingConstructors.insert(Object).second;
+      }
+      ~EvaluatingConstructorRAII() {
+        if (DidInsert) EI.EvaluatingConstructors.erase(Object);
+      }
+    };
+
+    bool isEvaluatingConstructor(APValue::LValueBase Decl, unsigned CallIndex) {
+      return EvaluatingConstructors.count(EvaluatingObject(Decl, CallIndex));
+    }
 
     /// The current array initialization index, if we're performing array
     /// initialization.
@@ -666,6 +691,7 @@ namespace {
     void setEvaluatingDecl(APValue::LValueBase Base, APValue &Value) {
       EvaluatingDecl = Base;
       EvaluatingDeclValue = &Value;
+      EvaluatingConstructors.insert({Base, 0});
     }
 
     const LangOptions &getLangOpts() const { return Ctx.getLangOpts(); }
@@ -977,24 +1003,23 @@ namespace {
   /// RAII object used to optionally suppress diagnostics and side-effects from
   /// a speculative evaluation.
   class SpeculativeEvaluationRAII {
-    /// Pair of EvalInfo, and a bit that stores whether or not we were
-    /// speculatively evaluating when we created this RAII.
-    llvm::PointerIntPair<EvalInfo *, 1, bool> InfoAndOldSpecEval;
-    Expr::EvalStatus Old;
+    EvalInfo *Info = nullptr;
+    Expr::EvalStatus OldStatus;
+    bool OldIsSpeculativelyEvaluating;
 
     void moveFromAndCancel(SpeculativeEvaluationRAII &&Other) {
-      InfoAndOldSpecEval = Other.InfoAndOldSpecEval;
-      Old = Other.Old;
-      Other.InfoAndOldSpecEval.setPointer(nullptr);
+      Info = Other.Info;
+      OldStatus = Other.OldStatus;
+      OldIsSpeculativelyEvaluating = Other.OldIsSpeculativelyEvaluating;
+      Other.Info = nullptr;
     }
 
     void maybeRestoreState() {
-      EvalInfo *Info = InfoAndOldSpecEval.getPointer();
       if (!Info)
         return;
 
-      Info->EvalStatus = Old;
-      Info->IsSpeculativelyEvaluating = InfoAndOldSpecEval.getInt();
+      Info->EvalStatus = OldStatus;
+      Info->IsSpeculativelyEvaluating = OldIsSpeculativelyEvaluating;
     }
 
   public:
@@ -1002,8 +1027,8 @@ namespace {
 
     SpeculativeEvaluationRAII(
         EvalInfo &Info, SmallVectorImpl<PartialDiagnosticAt> *NewDiag = nullptr)
-        : InfoAndOldSpecEval(&Info, Info.IsSpeculativelyEvaluating),
-          Old(Info.EvalStatus) {
+        : Info(&Info), OldStatus(Info.EvalStatus),
+          OldIsSpeculativelyEvaluating(Info.IsSpeculativelyEvaluating) {
       Info.EvalStatus.Diag = NewDiag;
       Info.IsSpeculativelyEvaluating = true;
     }
@@ -1665,6 +1690,19 @@ static bool CheckLValueConstantExpression(EvalInfo &Info, SourceLocation Loc,
   return true;
 }
 
+/// Member pointers are constant expressions unless they point to a
+/// non-virtual dllimport member function.
+static bool CheckMemberPointerConstantExpression(EvalInfo &Info,
+                                                 SourceLocation Loc,
+                                                 QualType Type,
+                                                 const APValue &Value) {
+  const ValueDecl *Member = Value.getMemberPointerDecl();
+  const auto *FD = dyn_cast_or_null<CXXMethodDecl>(Member);
+  if (!FD)
+    return true;
+  return FD->isVirtual() || !FD->hasAttr<DLLImportAttr>();
+}
+
 /// Check that this core constant expression is of literal type, and if not,
 /// produce an appropriate diagnostic.
 static bool CheckLiteralType(EvalInfo &Info, const Expr *E,
@@ -1756,6 +1794,9 @@ static bool CheckConstantExpression(EvalInfo &Info, SourceLocation DiagLoc,
     LVal.setFrom(Info.Ctx, Value);
     return CheckLValueConstantExpression(Info, DiagLoc, Type, LVal);
   }
+
+  if (Value.isMemberPointer())
+    return CheckMemberPointerConstantExpression(Info, DiagLoc, Type, Value);
 
   // Everything else is fine.
   return true;
@@ -3083,10 +3124,9 @@ static CompleteObject findCompleteObject(EvalInfo &Info, const Expr *E,
   }
 
   // During the construction of an object, it is not yet 'const'.
-  // FIXME: We don't set up EvaluatingDecl for local variables or temporaries,
-  // and this doesn't do quite the right thing for const subobjects of the
+  // FIXME: This doesn't do quite the right thing for const subobjects of the
   // object under construction.
-  if (LVal.getLValueBase() == Info.EvaluatingDecl) {
+  if (Info.isEvaluatingConstructor(LVal.getLValueBase(), LVal.CallIndex)) {
     BaseType = Info.Ctx.getCanonicalType(BaseType);
     BaseType.removeLocalConst();
   }
@@ -4239,6 +4279,8 @@ static bool HandleConstructorCall(const Expr *E, const LValue &This,
     return false;
   }
 
+  EvalInfo::EvaluatingConstructorRAII EvalObj(
+      Info, {This.getLValueBase(), This.CallIndex});
   CallStackFrame Frame(Info, CallLoc, Definition, &This, ArgValues);
 
   // FIXME: Creating an APValue just to hold a nonexistent return value is
@@ -6226,10 +6268,6 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
     // the initializer list.
     ImplicitValueInitExpr VIE(HaveInit ? Info.Ctx.IntTy : Field->getType());
     const Expr *Init = HaveInit ? E->getInit(ElementNo++) : &VIE;
-    if (Init->isValueDependent()) {
-      Success = false;
-      continue;
-    }
 
     // Temporarily override This, in case there's a CXXDefaultInitExpr in here.
     ThisOverrideRAII ThisOverride(*Info.CurrentCall, &This,
@@ -7891,6 +7929,9 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
     return BuiltinOp == Builtin::BI__atomic_always_lock_free ?
         Success(0, E) : Error(E);
   }
+  case Builtin::BIomp_is_initial_device:
+    // We can decide statically which value the runtime would return if called.
+    return Success(Info.getLangOpts().OpenMPIsDevice ? 0 : 1, E);
   }
 }
 
@@ -9512,7 +9553,7 @@ bool ComplexExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
   case BO_Mul:
     if (Result.isComplexFloat()) {
       // This is an implementation of complex multiplication according to the
-      // constraints laid out in C11 Annex G. The implemantion uses the
+      // constraints laid out in C11 Annex G. The implemention uses the
       // following naming scheme:
       //   (a + ib) * (c + id)
       ComplexValue LHS = Result;
@@ -9593,7 +9634,7 @@ bool ComplexExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
   case BO_Div:
     if (Result.isComplexFloat()) {
       // This is an implementation of complex division according to the
-      // constraints laid out in C11 Annex G. The implemantion uses the
+      // constraints laid out in C11 Annex G. The implemention uses the
       // following naming scheme:
       //   (a + ib) / (c + id)
       ComplexValue LHS = Result;
@@ -9776,6 +9817,8 @@ public:
 
   bool Success(const APValue &V, const Expr *e) { return true; }
 
+  bool ZeroInitialization(const Expr *E) { return true; }
+
   bool VisitCastExpr(const CastExpr *E) {
     switch (E->getCastKind()) {
     default:
@@ -9940,8 +9983,7 @@ static bool EvaluateAsRValue(EvalInfo &Info, const Expr *E, APValue &Result) {
 }
 
 static bool FastEvaluateAsRValue(const Expr *Exp, Expr::EvalResult &Result,
-                                 const ASTContext &Ctx, bool &IsConst,
-                                 bool IsCheckingForOverflow) {
+                                 const ASTContext &Ctx, bool &IsConst) {
   // Fast-path evaluations of integer literals, since we sometimes see files
   // containing vast quantities of these.
   if (const IntegerLiteral *L = dyn_cast<IntegerLiteral>(Exp)) {
@@ -9962,7 +10004,7 @@ static bool FastEvaluateAsRValue(const Expr *Exp, Expr::EvalResult &Result,
   // performance problems. Only do so in C++11 for now.
   if (Exp->isRValue() && (Exp->getType()->isArrayType() ||
                           Exp->getType()->isRecordType()) &&
-      !Ctx.getLangOpts().CPlusPlus11 && !IsCheckingForOverflow) {
+      !Ctx.getLangOpts().CPlusPlus11) {
     IsConst = false;
     return true;
   }
@@ -9977,7 +10019,7 @@ static bool FastEvaluateAsRValue(const Expr *Exp, Expr::EvalResult &Result,
 /// will be applied to the result.
 bool Expr::EvaluateAsRValue(EvalResult &Result, const ASTContext &Ctx) const {
   bool IsConst;
-  if (FastEvaluateAsRValue(this, Result, Ctx, IsConst, false))
+  if (FastEvaluateAsRValue(this, Result, Ctx, IsConst))
     return IsConst;
   
   EvalInfo Info(Ctx, Result, EvalInfo::EM_IgnoreSideEffects);
@@ -10102,7 +10144,7 @@ APSInt Expr::EvaluateKnownConstInt(const ASTContext &Ctx,
 void Expr::EvaluateForOverflow(const ASTContext &Ctx) const {
   bool IsConst;
   EvalResult EvalResult;
-  if (!FastEvaluateAsRValue(this, EvalResult, Ctx, IsConst, true)) {
+  if (!FastEvaluateAsRValue(this, EvalResult, Ctx, IsConst)) {
     EvalInfo Info(Ctx, EvalResult, EvalInfo::EM_EvaluateForOverflow);
     (void)::EvaluateAsRValue(Info, this, EvalResult.Val);
   }

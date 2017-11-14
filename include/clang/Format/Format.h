@@ -151,13 +151,20 @@ struct FormatStyle {
   /// \endcode
   bool AlignTrailingComments;
 
-  /// \brief Allow putting all parameters of a function declaration onto
+  /// \brief If the function declaration doesn't fit on a line,
+  /// allow putting all parameters of a function declaration onto
   /// the next line even if ``BinPackParameters`` is ``false``.
   /// \code
-  ///   true:                                   false:
-  ///   myFunction(foo,                 vs.     myFunction(foo, bar, plop);
-  ///              bar,
-  ///              plop);
+  ///   true:
+  ///   void myFunction(
+  ///       int a, int b, int c, int d, int e);
+  ///
+  ///   false:
+  ///   void myFunction(int a,
+  ///                   int b,
+  ///                   int c,
+  ///                   int d,
+  ///                   int e);
   /// \endcode
   bool AllowAllParametersOfDeclarationOnNextLine;
 
@@ -184,9 +191,23 @@ struct FormatStyle {
   enum ShortFunctionStyle {
     /// \brief Never merge functions into a single line.
     SFS_None,
+    /// \brief Only merge functions defined inside a class. Same as "inline",
+    /// except it does not implies "empty": i.e. top level empty functions
+    /// are not merged either.
+    /// \code
+    ///   class Foo {
+    ///     void f() { foo(); }
+    ///   };
+    ///   void f() {
+    ///     foo();
+    ///   }
+    ///   void f() {
+    ///   }
+    /// \endcode
+    SFS_InlineOnly,
     /// \brief Only merge empty functions.
     /// \code
-    ///   void f() { bar(); }
+    ///   void f() {}
     ///   void f2() {
     ///     bar2();
     ///   }
@@ -197,6 +218,10 @@ struct FormatStyle {
     ///   class Foo {
     ///     void f() { foo(); }
     ///   };
+    ///   void f() {
+    ///     foo();
+    ///   }
+    ///   void f() {}
     /// \endcode
     SFS_Inline,
     /// \brief Merge all functions fitting on a single line.
@@ -634,12 +659,12 @@ struct FormatStyle {
     ///   struct foo
     ///   {
     ///     int x;
-    ///   }
+    ///   };
     ///
     ///   false:
     ///   struct foo {
     ///     int x;
-    ///   }
+    ///   };
     /// \endcode
     bool AfterStruct;
     /// \brief Wrap union definitions.
@@ -656,6 +681,20 @@ struct FormatStyle {
     ///   }
     /// \endcode
     bool AfterUnion;
+    /// \brief Wrap extern blocks.
+    /// \code
+    ///   true:
+    ///   extern "C"
+    ///   {
+    ///     int foo();
+    ///   }
+    ///
+    ///   false:
+    ///   extern "C" {
+    ///   int foo();
+    ///   }
+    /// \endcode
+    bool AfterExternBlock;
     /// \brief Wrap before ``catch``.
     /// \code
     ///   true:
@@ -699,13 +738,43 @@ struct FormatStyle {
     ///                   }
     /// \endcode
     ///
-    bool SplitEmptyFunctionBody;
+    bool SplitEmptyFunction;
+    /// \brief If ``false``, empty record (e.g. class, struct or union) body
+    /// can be put on a single line. This option is used only if the opening
+    /// brace of the record has already been wrapped, i.e. the `AfterClass`
+    /// (for classes) brace wrapping mode is set.
+    /// \code
+    ///   class Foo   vs.  class Foo
+    ///   {}               {
+    ///                    }
+    /// \endcode
+    ///
+    bool SplitEmptyRecord;
+    /// \brief If ``false``, empty namespace body can be put on a single line.
+    /// This option is used only if the opening brace of the namespace has
+    /// already been wrapped, i.e. the `AfterNamespace` brace wrapping mode is
+    /// set.
+    /// \code
+    ///   namespace Foo   vs.  namespace Foo
+    ///   {}                   {
+    ///                        }
+    /// \endcode
+    ///
+    bool SplitEmptyNamespace;
   };
 
   /// \brief Control of individual brace wrapping cases.
   ///
   /// If ``BreakBeforeBraces`` is set to ``BS_Custom``, use this to specify how
   /// each individual brace case should be handled. Otherwise, this is ignored.
+  /// \code{.yaml}
+  ///   # Example of usage:
+  ///   BreakBeforeBraces: Custom
+  ///   BraceWrapping:
+  ///     AfterEnum: true
+  ///     AfterStruct: false
+  ///     SplitEmptyFunction: false
+  /// \endcode
   BraceWrappingFlags BraceWrapping;
 
   /// \brief If ``true``, ternary operators will be placed after line breaks.
@@ -715,7 +784,7 @@ struct FormatStyle {
   ///        ? firstValue
   ///        : SecondValueVeryVeryVeryVeryLong;
   ///
-  ///    true:
+  ///    false:
   ///    veryVeryVeryVeryVeryVeryVeryVeryVeryVeryVeryLongDescription ?
   ///        firstValue :
   ///        SecondValueVeryVeryVeryVeryLong;
@@ -723,8 +792,7 @@ struct FormatStyle {
   bool BreakBeforeTernaryOperators;
 
   /// \brief Different ways to break initializers.
-  enum BreakConstructorInitializersStyle
-  {
+  enum BreakConstructorInitializersStyle {
     /// Break constructor initializers before the colon and after the commas.
     /// \code
     /// Constructor()
@@ -749,7 +817,7 @@ struct FormatStyle {
     BCIS_AfterColon
   };
 
-  /// \brief The constructor initializers style to use..
+  /// \brief The constructor initializers style to use.
   BreakConstructorInitializersStyle BreakConstructorInitializers;
 
   /// \brief Break after each annotation on a field in Java files.
@@ -949,7 +1017,7 @@ struct FormatStyle {
   ///   IncludeCategories:
   ///     - Regex:           '^"(llvm|llvm-c|clang|clang-c)/'
   ///       Priority:        2
-  ///     - Regex:           '^(<|"(gtest|isl|json)/)'
+  ///     - Regex:           '^(<|"(gtest|gmock|isl|json)/)'
   ///       Priority:        3
   ///     - Regex:           '.*'
   ///       Priority:        1
@@ -984,6 +1052,31 @@ struct FormatStyle {
   ///    }                                      }
   /// \endcode
   bool IndentCaseLabels;
+
+  /// \brief Options for indenting preprocessor directives.
+  enum PPDirectiveIndentStyle {
+    /// Does not indent any directives.
+    /// \code
+    ///    #if FOO
+    ///    #if BAR
+    ///    #include <foo>
+    ///    #endif
+    ///    #endif
+    /// \endcode
+    PPDIS_None,
+    /// Indents directives after the hash.
+    /// \code
+    ///    #if FOO
+    ///    #  if BAR
+    ///    #    include <foo>
+    ///    #  endif
+    ///    #endif
+    /// \endcode
+    PPDIS_AfterHash
+  };
+
+  /// \brief The preprocessor directive indenting style to use.
+  PPDirectiveIndentStyle IndentPPDirectives;
 
   /// \brief The number of columns to use for indentation.
   /// \code
@@ -1081,7 +1174,10 @@ struct FormatStyle {
     /// (https://developers.google.com/protocol-buffers/).
     LK_Proto,
     /// Should be used for TableGen code.
-    LK_TableGen
+    LK_TableGen,
+    /// Should be used for Protocol Buffer messages in text format
+    /// (https://developers.google.com/protocol-buffers/).
+    LK_TextProto
   };
   bool isCpp() const { return Language == LK_Cpp || Language == LK_ObjC; }
 
@@ -1252,6 +1348,14 @@ struct FormatStyle {
   ///    #include "a.h"                         #include "b.h"
   /// \endcode
   bool SortIncludes;
+
+  /// \brief If ``true``, clang-format will sort using declarations.
+  /// \code
+  ///    false:                                 true:
+  ///    using std::cout;               vs.     using std::cin;
+  ///    using std::cin;                        using std::cout;
+  /// \endcode
+  bool SortUsingDeclarations;
 
   /// \brief If ``true``, a space is inserted after C style casts.
   /// \code
@@ -1464,6 +1568,7 @@ struct FormatStyle {
            ForEachMacros == R.ForEachMacros &&
            IncludeCategories == R.IncludeCategories &&
            IndentCaseLabels == R.IndentCaseLabels &&
+           IndentPPDirectives == R.IndentPPDirectives &&
            IndentWidth == R.IndentWidth && Language == R.Language &&
            IndentWrappedFunctionNames == R.IndentWrappedFunctionNames &&
            JavaScriptQuotes == R.JavaScriptQuotes &&
@@ -1641,6 +1746,16 @@ tooling::Replacements fixNamespaceEndComments(const FormatStyle &Style,
                                               ArrayRef<tooling::Range> Ranges,
                                               StringRef FileName = "<stdin>");
 
+/// \brief Sort consecutive using declarations in the given \p Ranges in
+/// \p Code.
+///
+/// Returns the ``Replacements`` that sort the using declarations in all
+/// \p Ranges in \p Code.
+tooling::Replacements sortUsingDeclarations(const FormatStyle &Style,
+                                            StringRef Code,
+                                            ArrayRef<tooling::Range> Ranges,
+                                            StringRef FileName = "<stdin>");
+
 /// \brief Returns the ``LangOpts`` that the formatter expects you to set.
 ///
 /// \param Style determines specific settings for lexing mode.
@@ -1693,6 +1808,8 @@ inline StringRef getLanguageName(FormatStyle::LanguageKind Language) {
     return "JavaScript";
   case FormatStyle::LK_Proto:
     return "Proto";
+  case FormatStyle::LK_TextProto:
+    return "TextProto";
   default:
     return "Unknown";
   }

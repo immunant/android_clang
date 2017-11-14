@@ -22,6 +22,7 @@
 #include "CodeGenPGO.h"
 #include "TargetInfo.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTLambda.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/StmtCXX.h"
@@ -117,14 +118,19 @@ CodeGenFunction::~CodeGenFunction() {
 }
 
 CharUnits CodeGenFunction::getNaturalPointeeTypeAlignment(QualType T,
-                                                    LValueBaseInfo *BaseInfo) {
-  return getNaturalTypeAlignment(T->getPointeeType(), BaseInfo,
-                                 /*forPointee*/ true);
+                                                    LValueBaseInfo *BaseInfo,
+                                                    TBAAAccessInfo *TBAAInfo) {
+  return getNaturalTypeAlignment(T->getPointeeType(), BaseInfo, TBAAInfo,
+                                 /* forPointeeType= */ true);
 }
 
 CharUnits CodeGenFunction::getNaturalTypeAlignment(QualType T,
                                                    LValueBaseInfo *BaseInfo,
+                                                   TBAAAccessInfo *TBAAInfo,
                                                    bool forPointeeType) {
+  if (TBAAInfo)
+    *TBAAInfo = CGM.getTBAAAccessInfo(T);
+
   // Honor alignment typedef attributes even on incomplete types.
   // We also honor them straight for C++ class types, even as pointees;
   // there's an expressivity gap here.
@@ -168,9 +174,10 @@ CharUnits CodeGenFunction::getNaturalTypeAlignment(QualType T,
 
 LValue CodeGenFunction::MakeNaturalAlignAddrLValue(llvm::Value *V, QualType T) {
   LValueBaseInfo BaseInfo;
-  CharUnits Alignment = getNaturalTypeAlignment(T, &BaseInfo);
+  TBAAAccessInfo TBAAInfo;
+  CharUnits Alignment = getNaturalTypeAlignment(T, &BaseInfo, &TBAAInfo);
   return LValue::MakeAddr(Address(V, Alignment), T, getContext(), BaseInfo,
-                          CGM.getTBAAInfo(T));
+                          TBAAInfo);
 }
 
 /// Given a value of type T* that may not be to a complete object,
@@ -178,8 +185,10 @@ LValue CodeGenFunction::MakeNaturalAlignAddrLValue(llvm::Value *V, QualType T) {
 LValue
 CodeGenFunction::MakeNaturalAlignPointeeAddrLValue(llvm::Value *V, QualType T) {
   LValueBaseInfo BaseInfo;
-  CharUnits Align = getNaturalTypeAlignment(T, &BaseInfo, /*pointee*/ true);
-  return MakeAddrLValue(Address(V, Align), T, BaseInfo);
+  TBAAAccessInfo TBAAInfo;
+  CharUnits Align = getNaturalTypeAlignment(T, &BaseInfo, &TBAAInfo,
+                                            /* forPointeeType= */ true);
+  return MakeAddrLValue(Address(V, Align), T, BaseInfo, TBAAInfo);
 }
 
 
@@ -428,6 +437,43 @@ bool CodeGenFunction::ShouldXRayInstrumentFunction() const {
   return CGM.getCodeGenOpts().XRayInstrumentFunctions;
 }
 
+llvm::Constant *
+CodeGenFunction::EncodeAddrForUseInPrologue(llvm::Function *F,
+                                            llvm::Constant *Addr) {
+  // Addresses stored in prologue data can't require run-time fixups and must
+  // be PC-relative. Run-time fixups are undesirable because they necessitate
+  // writable text segments, which are unsafe. And absolute addresses are
+  // undesirable because they break PIE mode.
+
+  // Add a layer of indirection through a private global. Taking its address
+  // won't result in a run-time fixup, even if Addr has linkonce_odr linkage.
+  auto *GV = new llvm::GlobalVariable(CGM.getModule(), Addr->getType(),
+                                      /*isConstant=*/true,
+                                      llvm::GlobalValue::PrivateLinkage, Addr);
+
+  // Create a PC-relative address.
+  auto *GOTAsInt = llvm::ConstantExpr::getPtrToInt(GV, IntPtrTy);
+  auto *FuncAsInt = llvm::ConstantExpr::getPtrToInt(F, IntPtrTy);
+  auto *PCRelAsInt = llvm::ConstantExpr::getSub(GOTAsInt, FuncAsInt);
+  return (IntPtrTy == Int32Ty)
+             ? PCRelAsInt
+             : llvm::ConstantExpr::getTrunc(PCRelAsInt, Int32Ty);
+}
+
+llvm::Value *
+CodeGenFunction::DecodeAddrUsedInPrologue(llvm::Value *F,
+                                          llvm::Value *EncodedAddr) {
+  // Reconstruct the address of the global.
+  auto *PCRelAsInt = Builder.CreateSExt(EncodedAddr, IntPtrTy);
+  auto *FuncAsInt = Builder.CreatePtrToInt(F, IntPtrTy, "func_addr.int");
+  auto *GOTAsInt = Builder.CreateAdd(PCRelAsInt, FuncAsInt, "global_addr.int");
+  auto *GOTAddr = Builder.CreateIntToPtr(GOTAsInt, Int8PtrPtrTy, "global_addr");
+
+  // Load the original pointer through the global.
+  return Builder.CreateLoad(Address(GOTAddr, getPointerAlign()),
+                            "decoded_addr");
+}
+
 /// EmitFunctionInstrumentation - Emit LLVM code to call the specified
 /// instrumentation function with the current function and the call site, if
 /// function instrumentation is enabled.
@@ -479,8 +525,8 @@ static void removeImageAccessQualifier(std::string& TyName) {
 // for example in clGetKernelArgInfo() implementation between the address
 // spaces with targets without unique mapping to the OpenCL address spaces
 // (basically all single AS CPUs).
-static unsigned ArgInfoAddressSpace(unsigned LangAS) {
-  switch (LangAS) {
+static unsigned ArgInfoAddressSpace(LangAS AS) {
+  switch (AS) {
   case LangAS::opencl_global:   return 1;
   case LangAS::opencl_constant: return 2;
   case LangAS::opencl_local:    return 3;
@@ -620,7 +666,10 @@ static void GenOpenCLArgMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 
     // Get image and pipe access qualifier:
     if (ty->isImageType()|| ty->isPipeType()) {
-      const OpenCLAccessAttr *A = parm->getAttr<OpenCLAccessAttr>();
+      const Decl *PDecl = parm;
+      if (auto *TD = dyn_cast<TypedefType>(ty))
+        PDecl = TD->getDecl();
+      const OpenCLAccessAttr *A = PDecl->getAttr<OpenCLAccessAttr>();
       if (A && A->isWriteOnly())
         accessQuals.push_back(llvm::MDString::get(Context, "write_only"));
       else if (A && A->isReadWrite())
@@ -720,6 +769,35 @@ static void markAsIgnoreThreadCheckingAtRuntime(llvm::Function *Fn) {
   Fn->removeFnAttr(llvm::Attribute::SanitizeThread);
 }
 
+static bool matchesStlAllocatorFn(const Decl *D, const ASTContext &Ctx) {
+  auto *MD = dyn_cast_or_null<CXXMethodDecl>(D);
+  if (!MD || !MD->getDeclName().getAsIdentifierInfo() ||
+      !MD->getDeclName().getAsIdentifierInfo()->isStr("allocate") ||
+      (MD->getNumParams() != 1 && MD->getNumParams() != 2))
+    return false;
+
+  if (MD->parameters()[0]->getType().getCanonicalType() != Ctx.getSizeType())
+    return false;
+
+  if (MD->getNumParams() == 2) {
+    auto *PT = MD->parameters()[1]->getType()->getAs<PointerType>();
+    if (!PT || !PT->isVoidPointerType() ||
+        !PT->getPointeeType().isConstQualified())
+      return false;
+  }
+
+  return true;
+}
+
+/// Return the UBSan prologue signature for \p FD if one is available.
+static llvm::Constant *getPrologueSignature(CodeGenModule &CGM,
+                                            const FunctionDecl *FD) {
+  if (const auto *MD = dyn_cast<CXXMethodDecl>(FD))
+    if (!MD->isStatic())
+      return nullptr;
+  return CGM.getTargetCodeGenInfo().getUBSanFunctionSignature(CGM);
+}
+
 void CodeGenFunction::StartFunction(GlobalDecl GD,
                                     QualType RetTy,
                                     llvm::Function *Fn,
@@ -743,8 +821,19 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   CurFnInfo = &FnInfo;
   assert(CurFn->isDeclaration() && "Function already has body?");
 
-  if (CGM.isInSanitizerBlacklist(Fn, Loc))
-    SanOpts.clear();
+  // If this function has been blacklisted for any of the enabled sanitizers,
+  // disable the sanitizer for the function.
+  do {
+#define SANITIZER(NAME, ID)                                                    \
+  if (SanOpts.empty())                                                         \
+    break;                                                                     \
+  if (SanOpts.has(SanitizerKind::ID))                                          \
+    if (CGM.isInSanitizerBlacklist(SanitizerKind::ID, Fn, Loc))                \
+      SanOpts.set(SanitizerKind::ID, false);
+
+#include "clang/Basic/Sanitizers.def"
+#undef SANITIZER
+  } while (0);
 
   if (D) {
     // Apply the no_sanitize* attributes to SanOpts.
@@ -779,6 +868,14 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
     }
   }
 
+  // Ignore unrelated casts in STL allocate() since the allocator must cast
+  // from void* to T* before object initialization completes. Don't match on the
+  // namespace because not all allocators are in std::
+  if (D && SanOpts.has(SanitizerKind::CFIUnrelatedCast)) {
+    if (matchesStlAllocatorFn(D, getContext()))
+      SanOpts.Mask &= ~SanitizerKind::CFIUnrelatedCast;
+  }
+
   // Apply xray attributes to the function (as a string, for now)
   if (D && ShouldXRayInstrumentFunction()) {
     if (const auto *XRayAttr = D->getAttr<XRayInstrumentAttr>()) {
@@ -806,6 +903,10 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   Fn->addFnAttr("no-jump-tables",
                 llvm::toStringRef(CGM.getCodeGenOpts().NoUseJumpTables));
 
+  // Add profile-sample-accurate value.
+  if (CGM.getCodeGenOpts().ProfileSampleAccurate)
+    Fn->addFnAttr("profile-sample-accurate");
+
   if (getLangOpts().OpenCL) {
     // Add metadata for a kernel function.
     if (const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D))
@@ -816,11 +917,13 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   // prologue data.
   if (getLangOpts().CPlusPlus && SanOpts.has(SanitizerKind::Function)) {
     if (const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D)) {
-      if (llvm::Constant *PrologueSig =
-              CGM.getTargetCodeGenInfo().getUBSanFunctionSignature(CGM)) {
+      if (llvm::Constant *PrologueSig = getPrologueSignature(CGM, FD)) {
         llvm::Constant *FTRTTIConst =
             CGM.GetAddrOfRTTIDescriptor(FD->getType(), /*ForEH=*/true);
-        llvm::Constant *PrologueStructElems[] = { PrologueSig, FTRTTIConst };
+        llvm::Constant *FTRTTIConstEncoded =
+            EncodeAddrForUseInPrologue(Fn, FTRTTIConst);
+        llvm::Constant *PrologueStructElems[] = {PrologueSig,
+                                                 FTRTTIConstEncoded};
         llvm::Constant *PrologueStructConst =
             llvm::ConstantStruct::getAnon(PrologueStructElems, /*Packed=*/true);
         Fn->setPrologueData(PrologueStructConst);
@@ -860,6 +963,13 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
 
   Builder.SetInsertPoint(EntryBB);
 
+  // If we're checking the return value, allocate space for a pointer to a
+  // precise source location of the checked return statement.
+  if (requiresReturnValueCheck()) {
+    ReturnLocation = CreateDefaultAlignTempAlloca(Int8PtrTy, "return.sloc.ptr");
+    InitTempAlloca(ReturnLocation, llvm::ConstantPointerNull::get(Int8PtrTy));
+  }
+
   // Emit subprogram debug descriptor.
   if (CGDebugInfo *DI = getDebugInfo()) {
     // Reconstruct the type from the argument list so that implicit parameters,
@@ -887,8 +997,10 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   if (CGM.getCodeGenOpts().InstrumentForProfiling) {
     if (CGM.getCodeGenOpts().CallFEntry)
       Fn->addFnAttr("fentry-call", "true");
-    else
-      Fn->addFnAttr("counting-function", getTarget().getMCountName());
+    else {
+      if (!CurFuncDecl || !CurFuncDecl->hasAttr<NoInstrumentFunctionAttr>())
+        Fn->addFnAttr("counting-function", getTarget().getMCountName());
+    }
   }
 
   if (RetTy->isVoidType()) {
@@ -974,11 +1086,22 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
     }
 
     // Check the 'this' pointer once per function, if it's available.
-    if (CXXThisValue) {
+    if (CXXABIThisValue) {
       SanitizerSet SkippedChecks;
       SkippedChecks.set(SanitizerKind::ObjectSize, true);
       QualType ThisTy = MD->getThisType(getContext());
-      EmitTypeCheck(TCK_Load, Loc, CXXThisValue, ThisTy,
+
+      // If this is the call operator of a lambda with no capture-default, it
+      // may have a static invoker function, which may call this operator with
+      // a null 'this' pointer.
+      if (isLambdaCallOperator(MD) &&
+          cast<CXXRecordDecl>(MD->getParent())->getLambdaCaptureDefault() ==
+              LCD_None)
+        SkippedChecks.set(SanitizerKind::Null, true);
+
+      EmitTypeCheck(isa<CXXConstructorDecl>(MD) ? TCK_ConstructorCall
+                                                : TCK_MemberCall,
+                    Loc, CXXABIThisValue, ThisTy,
                     getContext().getTypeAlignInChars(ThisTy->getPointeeType()),
                     SkippedChecks);
     }
@@ -1164,16 +1287,11 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
            !getLangOpts().CUDAIsDevice &&
            FD->hasAttr<CUDAGlobalAttr>())
     CGM.getCUDARuntime().emitDeviceStub(*this, Args);
-  else if (isa<CXXConversionDecl>(FD) &&
-           cast<CXXConversionDecl>(FD)->isLambdaToBlockPointerConversion()) {
-    // The lambda conversion to block pointer is special; the semantics can't be
-    // expressed in the AST, so IRGen needs to special-case it.
-    EmitLambdaToBlockPointerBody(Args);
-  } else if (isa<CXXMethodDecl>(FD) &&
-             cast<CXXMethodDecl>(FD)->isLambdaStaticInvoker()) {
+  else if (isa<CXXMethodDecl>(FD) &&
+           cast<CXXMethodDecl>(FD)->isLambdaStaticInvoker()) {
     // The lambda static invoker function is special, because it forwards or
     // clones the body of the function call operator (but is actually static).
-    EmitLambdaStaticInvokeFunction(cast<CXXMethodDecl>(FD));
+    EmitLambdaStaticInvokeBody(cast<CXXMethodDecl>(FD));
   } else if (FD->isDefaulted() && isa<CXXMethodDecl>(FD) &&
              (cast<CXXMethodDecl>(FD)->isCopyAssignmentOperator() ||
               cast<CXXMethodDecl>(FD)->isMoveAssignmentOperator())) {

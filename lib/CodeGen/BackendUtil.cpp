@@ -54,6 +54,7 @@
 #include "llvm/Transforms/ObjCARC.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Utils/NameAnonGlobals.h"
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include <memory>
 using namespace clang;
@@ -188,6 +189,8 @@ static void addSanitizerCoveragePass(const PassManagerBuilder &Builder,
   Opts.TracePCGuard = CGOpts.SanitizeCoverageTracePCGuard;
   Opts.NoPrune = CGOpts.SanitizeCoverageNoPrune;
   Opts.Inline8bitCounters = CGOpts.SanitizeCoverageInline8bitCounters;
+  Opts.PCTable = CGOpts.SanitizeCoveragePCTable;
+  Opts.StackDepth = CGOpts.SanitizeCoverageStackDepth;
   PM.add(createSanitizerCoverageModulePass(Opts));
 }
 
@@ -333,16 +336,18 @@ static CodeGenOpt::Level getCGOptLevel(const CodeGenOptions &CodeGenOpts) {
   }
 }
 
-static llvm::CodeModel::Model getCodeModel(const CodeGenOptions &CodeGenOpts) {
-  unsigned CodeModel =
-      llvm::StringSwitch<unsigned>(CodeGenOpts.CodeModel)
-      .Case("small", llvm::CodeModel::Small)
-      .Case("kernel", llvm::CodeModel::Kernel)
-      .Case("medium", llvm::CodeModel::Medium)
-      .Case("large", llvm::CodeModel::Large)
-      .Case("default", llvm::CodeModel::Default)
-      .Default(~0u);
+static Optional<llvm::CodeModel::Model>
+getCodeModel(const CodeGenOptions &CodeGenOpts) {
+  unsigned CodeModel = llvm::StringSwitch<unsigned>(CodeGenOpts.CodeModel)
+                           .Case("small", llvm::CodeModel::Small)
+                           .Case("kernel", llvm::CodeModel::Kernel)
+                           .Case("medium", llvm::CodeModel::Medium)
+                           .Case("large", llvm::CodeModel::Large)
+                           .Case("default", ~1u)
+                           .Default(~0u);
   assert(CodeModel != ~0u && "invalid code model!");
+  if (CodeModel == ~1u)
+    return None;
   return static_cast<llvm::CodeModel::Model>(CodeModel);
 }
 
@@ -414,11 +419,7 @@ static void initTargetOptions(llvm::TargetOptions &Options,
   Options.RelaxELFRelocations = CodeGenOpts.RelaxELFRelocations;
 
   // Set EABI version.
-  Options.EABIVersion = llvm::StringSwitch<llvm::EABI>(TargetOpts.EABIVersion)
-                            .Case("4", llvm::EABI::EABI4)
-                            .Case("5", llvm::EABI::EABI5)
-                            .Case("gnu", llvm::EABI::GNU)
-                            .Default(llvm::EABI::Default);
+  Options.EABIVersion = TargetOpts.EABIVersion;
 
   if (LangOpts.SjLjExceptions)
     Options.ExceptionModel = llvm::ExceptionHandling::SjLj;
@@ -491,7 +492,6 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
 
   PMBuilder.OptLevel = CodeGenOpts.OptimizationLevel;
   PMBuilder.SizeLevel = CodeGenOpts.OptimizeSize;
-  PMBuilder.BBVectorize = CodeGenOpts.VectorizeBB;
   PMBuilder.SLPVectorize = CodeGenOpts.VectorizeSLP;
   PMBuilder.LoopVectorize = CodeGenOpts.VectorizeLoop;
 
@@ -661,7 +661,7 @@ void EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
     return;
   }
 
-  llvm::CodeModel::Model CM  = getCodeModel(CodeGenOpts);
+  Optional<llvm::CodeModel::Model> CM = getCodeModel(CodeGenOpts);
   std::string FeaturesStr =
       llvm::join(TargetOpts.Features.begin(), TargetOpts.Features.end(), ",");
   llvm::Reloc::Model RM = getRelocModel(CodeGenOpts);
@@ -844,24 +844,27 @@ void EmitAssemblyHelper::EmitAssemblyWithNewPassManager(
     return;
   TheModule->setDataLayout(TM->createDataLayout());
 
-  PGOOptions PGOOpt;
+  Optional<PGOOptions> PGOOpt;
 
-  // -fprofile-generate.
-  PGOOpt.RunProfileGen = CodeGenOpts.hasProfileIRInstr();
-  if (PGOOpt.RunProfileGen)
-    PGOOpt.ProfileGenFile = CodeGenOpts.InstrProfileOutput.empty() ?
-      DefaultProfileGenName : CodeGenOpts.InstrProfileOutput;
+  if (CodeGenOpts.hasProfileIRInstr())
+    // -fprofile-generate.
+    PGOOpt = PGOOptions(CodeGenOpts.InstrProfileOutput.empty()
+                            ? DefaultProfileGenName
+                            : CodeGenOpts.InstrProfileOutput,
+                        "", "", true, CodeGenOpts.DebugInfoForProfiling);
+  else if (CodeGenOpts.hasProfileIRUse())
+    // -fprofile-use.
+    PGOOpt = PGOOptions("", CodeGenOpts.ProfileInstrumentUsePath, "", false,
+                        CodeGenOpts.DebugInfoForProfiling);
+  else if (!CodeGenOpts.SampleProfileFile.empty())
+    // -fprofile-sample-use
+    PGOOpt = PGOOptions("", "", CodeGenOpts.SampleProfileFile, false,
+                        CodeGenOpts.DebugInfoForProfiling);
+  else if (CodeGenOpts.DebugInfoForProfiling)
+    // -fdebug-info-for-profiling
+    PGOOpt = PGOOptions("", "", "", false, true);
 
-  // -fprofile-use.
-  if (CodeGenOpts.hasProfileIRUse())
-    PGOOpt.ProfileUseFile = CodeGenOpts.ProfileInstrumentUsePath;
-
-  // Only pass a PGO options struct if -fprofile-generate or
-  // -fprofile-use were passed on the cmdline.
-  PassBuilder PB(TM.get(),
-    (PGOOpt.RunProfileGen ||
-      !PGOOpt.ProfileUseFile.empty()) ?
-        Optional<PGOOptions>(PGOOpt) : None);
+  PassBuilder PB(TM.get(), PGOOpt);
 
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
@@ -871,6 +874,14 @@ void EmitAssemblyHelper::EmitAssemblyWithNewPassManager(
   // Register the AA manager first so that our version is the one used.
   FAM.registerPass([&] { return PB.buildDefaultAAPipeline(); });
 
+  // Register the target library analysis directly and give it a customized
+  // preset TLI.
+  Triple TargetTriple(TheModule->getTargetTriple());
+  std::unique_ptr<TargetLibraryInfoImpl> TLII(
+      createTLII(TargetTriple, CodeGenOpts));
+  FAM.registerPass([&] { return TargetLibraryAnalysis(*TLII); });
+  MAM.registerPass([&] { return TargetLibraryAnalysis(*TLII); });
+
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
@@ -878,20 +889,34 @@ void EmitAssemblyHelper::EmitAssemblyWithNewPassManager(
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  ModulePassManager MPM;
+  ModulePassManager MPM(CodeGenOpts.DebugPassManager);
 
   if (!CodeGenOpts.DisableLLVMPasses) {
+    bool IsThinLTO = CodeGenOpts.EmitSummaryIndex;
+    bool IsLTO = CodeGenOpts.PrepareForLTO;
+
     if (CodeGenOpts.OptimizationLevel == 0) {
       // Build a minimal pipeline based on the semantics required by Clang,
       // which is just that always inlining occurs.
       MPM.addPass(AlwaysInlinerPass());
+      if (IsThinLTO)
+        MPM.addPass(NameAnonGlobalPass());
     } else {
-      // Otherwise, use the default pass pipeline. We also have to map our
-      // optimization levels into one of the distinct levels used to configure
-      // the pipeline.
+      // Map our optimization levels into one of the distinct levels used to
+      // configure the pipeline.
       PassBuilder::OptimizationLevel Level = mapToLevel(CodeGenOpts);
 
-      MPM = PB.buildPerModuleDefaultPipeline(Level);
+      if (IsThinLTO) {
+        MPM = PB.buildThinLTOPreLinkDefaultPipeline(
+            Level, CodeGenOpts.DebugPassManager);
+        MPM.addPass(NameAnonGlobalPass());
+      } else if (IsLTO) {
+        MPM = PB.buildLTOPreLinkDefaultPipeline(Level,
+                                                CodeGenOpts.DebugPassManager);
+      } else {
+        MPM = PB.buildPerModuleDefaultPipeline(Level,
+                                               CodeGenOpts.DebugPassManager);
+      }
     }
   }
 
@@ -984,7 +1009,7 @@ static void runThinLTOBackend(ModuleSummaryIndex *CombinedIndex, Module *M,
                               std::unique_ptr<raw_pwrite_stream> OS,
                               std::string SampleProfile,
                               BackendAction Action) {
-  StringMap<std::map<GlobalValue::GUID, GlobalValueSummary *>>
+  StringMap<DenseMap<GlobalValue::GUID, GlobalValueSummary *>>
       ModuleToDefinedGVSummaries;
   CombinedIndex->collectDefinedGVSummariesPerModule(ModuleToDefinedGVSummaries);
 

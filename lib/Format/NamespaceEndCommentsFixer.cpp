@@ -118,6 +118,12 @@ getNamespaceToken(const AnnotatedLine *line,
     return nullptr;
   assert(StartLineIndex < AnnotatedLines.size());
   const FormatToken *NamespaceTok = AnnotatedLines[StartLineIndex]->First;
+  if (NamespaceTok->is(tok::l_brace)) {
+    // "namespace" keyword can be on the line preceding '{', e.g. in styles
+    // where BraceWrapping.AfterNamespace is true.
+    if (StartLineIndex > 0)
+      NamespaceTok = AnnotatedLines[StartLineIndex - 1]->First;
+  }
   // Detect "(inline)? namespace" in the beginning of a line.
   if (NamespaceTok->is(tok::kw_inline))
     NamespaceTok = NamespaceTok->getNextNonComment();
@@ -174,7 +180,7 @@ tooling::Replacements NamespaceEndCommentsFixer::analyze(
         AllNamespaceNames = "::" + NamespaceName + AllNamespaceNames;
         continue;
       }
-      NamespaceName += std::move(AllNamespaceNames);
+      NamespaceName += AllNamespaceNames;
       CompactedNamespacesCount = 0;
       AllNamespaceNames = std::string();
     }

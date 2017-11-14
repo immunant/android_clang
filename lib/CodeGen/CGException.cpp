@@ -15,6 +15,7 @@
 #include "CGCXXABI.h"
 #include "CGCleanup.h"
 #include "CGObjCRuntime.h"
+#include "ConstantEmitter.h"
 #include "TargetInfo.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/StmtCXX.h"
@@ -224,7 +225,12 @@ const EHPersonality &EHPersonality::get(CodeGenModule &CGM,
 }
 
 const EHPersonality &EHPersonality::get(CodeGenFunction &CGF) {
-  return get(CGF.CGM, dyn_cast_or_null<FunctionDecl>(CGF.CurCodeDecl));
+  const auto *FD = CGF.CurCodeDecl;
+  // For outlined finallys and filters, use the SEH personality in case they
+  // contain more SEH. This mostly only affects finallys. Filters could
+  // hypothetically use gnu statement expressions to sneak in nested SEH.
+  FD = FD ? FD : CGF.CurSEHParent;
+  return get(CGF.CGM, dyn_cast_or_null<FunctionDecl>(FD));
 }
 
 static llvm::Constant *getPersonalityFn(CodeGenModule &CGM,
@@ -1800,7 +1806,8 @@ void CodeGenFunction::EnterSEHTryStmt(const SEHTryStmt &S) {
   // "catch i8* null". We can't do this on x86 because the filter has to save
   // the exception code.
   llvm::Constant *C =
-      CGM.EmitConstantExpr(Except->getFilterExpr(), getContext().IntTy, this);
+    ConstantEmitter(*this).tryEmitAbstract(Except->getFilterExpr(),
+                                           getContext().IntTy);
   if (CGM.getTarget().getTriple().getArch() != llvm::Triple::x86 && C &&
       C->isOneValue()) {
     CatchScope->setCatchAllHandler(0, createBasicBlock("__except"));
