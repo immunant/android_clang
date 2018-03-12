@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -triple i686-linux-gnu -target-cpu i686 -emit-llvm %s -o - | FileCheck %s
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -target-cpu x86-64 -emit-llvm %s -o - | FileCheck %s
 
 int baz(int a) { return 4; }
 
@@ -18,7 +18,7 @@ int __attribute__((target("no-aes, arch=ivybridge"))) qax(int a) { return 4; }
 
 int __attribute__((target("no-mmx"))) qq(int a) { return 40; }
 
-int __attribute__((target("arch=lakemont,mmx"))) lake(int a) { return 4; }
+int __attribute__((target("arch=lakemont"))) lake(int a) { return 4; }
 
 // Check that we emit the additional subtarget and cpu features for foo and not for baz or bar.
 // CHECK: baz{{.*}} #0

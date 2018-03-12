@@ -1125,8 +1125,6 @@ void X86TargetInfo::getTargetDefines(const LangOptions &Opts,
 
 bool X86TargetInfo::isValidFeatureName(StringRef Name) const {
   return llvm::StringSwitch<bool>(Name)
-      .Case("3dnow", true)
-      .Case("3dnowa", true)
       .Case("aes", true)
       .Case("avx", true)
       .Case("avx2", true)
@@ -1179,7 +1177,6 @@ bool X86TargetInfo::isValidFeatureName(StringRef Name) const {
       .Case("x86", true)
       .Case("x86_32", true)
       .Case("x86_64", true)
-      .Case("x87", true)
       .Case("xop", true)
       .Case("xsave", true)
       .Case("xsavec", true)
