@@ -31,12 +31,12 @@
 #define LLVM_CLANG_TOOLING_TOOLING_H
 
 #include "clang/AST/ASTConsumer.h"
-#include "clang/Frontend/PCHContainerOperations.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Driver/Util.h"
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/Frontend/PCHContainerOperations.h"
 #include "clang/Lex/ModuleLoader.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
 #include "clang/Tooling/CompilationDatabase.h"
@@ -296,10 +296,14 @@ class ClangTool {
   ///        not found in Compilations, it is skipped.
   /// \param PCHContainerOps The PCHContainerOperations for loading and creating
   /// clang modules.
+  /// \param BaseFS VFS used for all underlying file accesses when running the
+  /// tool.
   ClangTool(const CompilationDatabase &Compilations,
             ArrayRef<std::string> SourcePaths,
             std::shared_ptr<PCHContainerOperations> PCHContainerOps =
-                std::make_shared<PCHContainerOperations>());
+                std::make_shared<PCHContainerOperations>(),
+            IntrusiveRefCntPtr<vfs::FileSystem> BaseFS =
+                vfs::getRealFileSystem());
 
   ~ClangTool();
 
@@ -326,6 +330,9 @@ class ClangTool {
   /// Runs an action over all files specified in the command line.
   ///
   /// \param Action Tool action.
+  ///
+  /// \returns 0 on success; 1 if any error occured; 2 if there is no error but
+  /// some files are skipped due to missing compile commands.
   int run(ToolAction *Action);
 
   /// \brief Create an AST for each file specified in the command line and
@@ -337,7 +344,9 @@ class ClangTool {
   /// The file manager is shared between all translation units.
   FileManager &getFiles() { return *Files; }
 
- private:
+  llvm::ArrayRef<std::string> getSourcePaths() const { return SourcePaths; }
+
+private:
   const CompilationDatabase &Compilations;
   std::vector<std::string> SourcePaths;
   std::shared_ptr<PCHContainerOperations> PCHContainerOps;

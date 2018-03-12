@@ -94,6 +94,9 @@ if sys.version_info[0] == 3:
                 return cls(param)
             if isinstance(param, bytes):
                 return cls(param)
+            if param is None:
+                # Support passing null to C functions expecting char arrays
+                return None
             raise TypeError("Cannot convert '{}' to '{}'".format(type(param).__name__, cls.__name__))
 
         @staticmethod
@@ -1475,6 +1478,12 @@ class Cursor(Structure):
         function template that is declared 'virtual'.
         """
         return conf.lib.clang_CXXMethod_isVirtual(self)
+
+    def is_abstract_record(self):
+        """Returns True if the cursor refers to a C++ record declaration
+        that has pure virtual member functions.
+        """
+        return conf.lib.clang_CXXRecord_isAbstract(self)
 
     def is_scoped_enum(self):
         """Returns True if the cursor refers to a scoped enum declaration.
@@ -3395,6 +3404,10 @@ functionList = [
    bool),
 
   ("clang_CXXMethod_isVirtual",
+   [Cursor],
+   bool),
+
+  ("clang_CXXRecord_isAbstract",
    [Cursor],
    bool),
 

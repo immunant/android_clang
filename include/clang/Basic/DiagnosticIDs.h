@@ -34,7 +34,7 @@ namespace clang {
       DIAG_SIZE_SERIALIZATION =  120,
       DIAG_SIZE_LEX           =  400,
       DIAG_SIZE_PARSE         =  500,
-      DIAG_SIZE_AST           =  110,
+      DIAG_SIZE_AST           =  150,
       DIAG_SIZE_COMMENT       =  100,
       DIAG_SIZE_CROSSTU       =  100,
       DIAG_SIZE_SEMA          = 3500,
@@ -296,8 +296,8 @@ public:
                              SmallVectorImpl<diag::kind> &Diags) const;
 
   /// \brief Get the set of all diagnostic IDs.
-  void getAllDiagnostics(diag::Flavor Flavor,
-                         SmallVectorImpl<diag::kind> &Diags) const;
+  static void getAllDiagnostics(diag::Flavor Flavor,
+                                std::vector<diag::kind> &Diags);
 
   /// \brief Get the diagnostic option with the closest edit distance to the
   /// given group name.

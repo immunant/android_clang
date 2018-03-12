@@ -618,7 +618,7 @@ ObjCPropertyDecl *Sema::CreatePropertyDecl(Scope *S,
     TInfo = Context.getTrivialTypeSourceInfo(T, TLoc);
   }
 
-  DeclContext *DC = cast<DeclContext>(CDecl);
+  DeclContext *DC = CDecl;
   ObjCPropertyDecl *PDecl = ObjCPropertyDecl::Create(Context, DC,
                                                      FD.D.getIdentifierLoc(),
                                                      PropertyId, AtLoc, 
@@ -1289,6 +1289,14 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
         Diag(property->getLocation(), diag::note_property_declare);
         // An abstract type is as bad as an incomplete type.
         CompleteTypeErr = true;
+      }
+      if (!CompleteTypeErr) {
+        const RecordType *RecordTy = PropertyIvarType->getAs<RecordType>();
+        if (RecordTy && RecordTy->getDecl()->hasFlexibleArrayMember()) {
+          Diag(PropertyIvarLoc, diag::err_synthesize_variable_sized_ivar)
+            << PropertyIvarType;
+          CompleteTypeErr = true; // suppress later diagnostics about the ivar
+        }
       }
       if (CompleteTypeErr)
         Ivar->setInvalidDecl();
