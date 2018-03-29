@@ -343,6 +343,10 @@ llvm::Function *CodeGenModule::CreateGlobalInitOrDestructFunction(
       !isInSanitizerBlacklist(SanitizerKind::SafeStack, Fn, Loc))
     Fn->addFnAttr(llvm::Attribute::SafeStack);
 
+  if (getLangOpts().Sanitize.has(SanitizerKind::Pagerando) &&
+      !isInSanitizerBlacklist(SanitizerKind::Pagerando, Fn, Loc))
+    Fn->addFnAttr(llvm::Attribute::Pagerando);
+
   return Fn;
 }
 

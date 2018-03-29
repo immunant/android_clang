@@ -881,6 +881,8 @@ SanitizerMask Linux::getSupportedSanitizers() const {
     Res |= SanitizerKind::Scudo;
   if (IsX86_64 || IsAArch64)
     Res |= SanitizerKind::HWAddress;
+  if (IsArmArch || IsAArch64)
+    Res |= SanitizerKind::Pagerando;
   return Res;
 }
 
