@@ -6067,6 +6067,16 @@ TEST_F(FormatTest, UnderstandsAttributes) {
                AfterType);
 }
 
+TEST_F(FormatTest, UnderstandsSquareAttributes) {
+  verifyFormat("SomeType s [[unused]] (InitValue);");
+  verifyFormat("SomeType s [[gnu::unused]] (InitValue);");
+  verifyFormat("SomeType s [[using gnu: unused]] (InitValue);");
+  verifyFormat("[[gsl::suppress(\"clang-tidy-check-name\")]] void f() {}");
+  verifyFormat("void f() [[deprecated(\"so sorry\")]];");
+  verifyFormat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+               "    [[unused]] aaaaaaaaaaaaaaaaaaaaaaa(int i);");
+}
+
 TEST_F(FormatTest, UnderstandsEllipsis) {
   verifyFormat("int printf(const char *fmt, ...);");
   verifyFormat("template <class... Ts> void Foo(Ts... ts) { Foo(ts...); }");
@@ -8084,6 +8094,9 @@ TEST_F(FormatTest, CountsCharactersInMultilineRawStringLiterals) {
                    "multiline raw string literal xxxxxxxxxxxxxx\n"
                    ")x\" + bbbbbb);",
                    getGoogleStyleWithColumns(20)));
+  EXPECT_EQ("fffffffffff(R\"(single line raw string)\" + bbbbbb);",
+            format("fffffffffff(\n"
+                   " R\"(single line raw string)\" + bbbbbb);"));
 }
 
 TEST_F(FormatTest, SkipsUnknownStringLiterals) {
@@ -8805,6 +8818,7 @@ TEST_F(FormatTest, ConfigurableSpacesInParentheses) {
   FormatStyle Spaces = getLLVMStyle();
 
   Spaces.SpacesInParentheses = true;
+  verifyFormat("do_something( ::globalVar );", Spaces);
   verifyFormat("call( x, y, z );", Spaces);
   verifyFormat("call();", Spaces);
   verifyFormat("std::function<void( int, int )> callback;", Spaces);
@@ -12086,31 +12100,71 @@ TEST_F(FormatTest, FileAndCode) {
   EXPECT_EQ(FormatStyle::LK_ObjC, guessLanguage("foo.h", "@interface Foo\n@end\n"));
   EXPECT_EQ(FormatStyle::LK_Cpp, guessLanguage("foo", ""));
   EXPECT_EQ(FormatStyle::LK_ObjC, guessLanguage("foo", "@interface Foo\n@end\n"));
-}
-
-TEST_F(FormatTest, GuessLanguageWithForIn) {
-  EXPECT_EQ(FormatStyle::LK_Cpp,
-            guessLanguage("foo.h", "for (Foo *x = 0; x != in; x++) {}"));
   EXPECT_EQ(FormatStyle::LK_ObjC,
-            guessLanguage("foo.h", "for (Foo *x in bar) {}"));
-  EXPECT_EQ(FormatStyle::LK_ObjC,
-            guessLanguage("foo.h", "for (Foo *x in [bar baz]) {}"));
-  EXPECT_EQ(FormatStyle::LK_ObjC,
-            guessLanguage("foo.h", "for (Foo *x in [bar baz:blech]) {}"));
+            guessLanguage("foo.h", "int DoStuff(CGRect rect);\n"));
   EXPECT_EQ(
       FormatStyle::LK_ObjC,
-      guessLanguage("foo.h", "for (Foo *x in [bar baz:blech, 1, 2, 3, 0]) {}"));
+      guessLanguage("foo.h",
+                    "#define MY_POINT_MAKE(x, y) CGPointMake((x), (y));\n"));
+}
+
+TEST_F(FormatTest, GuessLanguageWithCpp11AttributeSpecifiers) {
+  EXPECT_EQ(FormatStyle::LK_Cpp, guessLanguage("foo.h", "[[noreturn]];"));
   EXPECT_EQ(FormatStyle::LK_ObjC,
-            guessLanguage("foo.h", "for (Foo *x in [bar baz:^{[uh oh];}]) {}"));
+            guessLanguage("foo.h", "array[[calculator getIndex]];"));
   EXPECT_EQ(FormatStyle::LK_Cpp,
-            guessLanguage("foo.h", "Foo *x; for (x = 0; x != in; x++) {}"));
-  EXPECT_EQ(FormatStyle::LK_ObjC,
-            guessLanguage("foo.h", "Foo *x; for (x in y) {}"));
+            guessLanguage("foo.h", "[[noreturn, deprecated(\"so sorry\")]];"));
   EXPECT_EQ(
       FormatStyle::LK_Cpp,
-      guessLanguage(
-          "foo.h",
-          "for (const Foo<Bar>& baz = in.value(); !baz.at_end(); ++baz) {}"));
+      guessLanguage("foo.h", "[[noreturn, deprecated(\"gone, sorry\")]];"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "[[noreturn foo] bar];"));
+  EXPECT_EQ(FormatStyle::LK_Cpp,
+            guessLanguage("foo.h", "[[clang::fallthrough]];"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "[[clang:fallthrough] foo];"));
+  EXPECT_EQ(FormatStyle::LK_Cpp,
+            guessLanguage("foo.h", "[[gsl::suppress(\"type\")]];"));
+  EXPECT_EQ(FormatStyle::LK_Cpp,
+            guessLanguage("foo.h", "[[using clang: fallthrough]];"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "[[abusing clang:fallthrough] bar];"));
+  EXPECT_EQ(FormatStyle::LK_Cpp,
+            guessLanguage("foo.h", "[[using gsl: suppress(\"type\")]];"));
+  EXPECT_EQ(
+      FormatStyle::LK_Cpp,
+      guessLanguage("foo.h",
+                    "[[clang::callable_when(\"unconsumed\", \"unknown\")]]"));
+  EXPECT_EQ(FormatStyle::LK_Cpp, guessLanguage("foo.h", "[[foo::bar, ...]]"));
+}
+
+TEST_F(FormatTest, GuessLanguageWithCaret) {
+  EXPECT_EQ(FormatStyle::LK_Cpp, guessLanguage("foo.h", "FOO(^);"));
+  EXPECT_EQ(FormatStyle::LK_Cpp, guessLanguage("foo.h", "FOO(^, Bar);"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "int(^)(char, float);"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "int(^foo)(char, float);"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "int(^foo[10])(char, float);"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "int(^foo[kNumEntries])(char, float);"));
+  EXPECT_EQ(
+      FormatStyle::LK_ObjC,
+      guessLanguage("foo.h", "int(^foo[(kNumEntries + 10)])(char, float);"));
+}
+
+TEST_F(FormatTest, GuessLanguageWithChildLines) {
+  EXPECT_EQ(FormatStyle::LK_Cpp,
+            guessLanguage("foo.h", "#define FOO ({ std::string s; })"));
+  EXPECT_EQ(FormatStyle::LK_ObjC,
+            guessLanguage("foo.h", "#define FOO ({ NSString *s; })"));
+  EXPECT_EQ(
+      FormatStyle::LK_Cpp,
+      guessLanguage("foo.h", "#define FOO ({ foo(); ({ std::string s; }) })"));
+  EXPECT_EQ(
+      FormatStyle::LK_ObjC,
+      guessLanguage("foo.h", "#define FOO ({ foo(); ({ NSString *s; }) })"));
 }
 
 } // end namespace

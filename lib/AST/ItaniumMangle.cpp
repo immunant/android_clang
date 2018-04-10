@@ -323,7 +323,7 @@ class CXXNameMangler {
                        AdditionalAbiTags->end());
       }
 
-      std::sort(TagList.begin(), TagList.end());
+      llvm::sort(TagList.begin(), TagList.end());
       TagList.erase(std::unique(TagList.begin(), TagList.end()), TagList.end());
 
       writeSortedUniqueAbiTags(Out, TagList);
@@ -339,7 +339,7 @@ class CXXNameMangler {
     }
 
     const AbiTagList &getSortedUniqueUsedAbiTags() {
-      std::sort(UsedAbiTags.begin(), UsedAbiTags.end());
+      llvm::sort(UsedAbiTags.begin(), UsedAbiTags.end());
       UsedAbiTags.erase(std::unique(UsedAbiTags.begin(), UsedAbiTags.end()),
                         UsedAbiTags.end());
       return UsedAbiTags;
@@ -2628,6 +2628,7 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
   case CC_OpenCLKernel:
   case CC_PreserveMost:
   case CC_PreserveAll:
+  case CC_CUDAKernel:
     // FIXME: we should be mangling all of the above.
     return "";
 
@@ -2688,7 +2689,7 @@ void CXXNameMangler::mangleType(const FunctionProtoType *T) {
 
   // Mangle CV-qualifiers, if present.  These are 'this' qualifiers,
   // e.g. "const" in "int (A::*)() const".
-  mangleQualifiers(Qualifiers::fromCVRMask(T->getTypeQuals()));
+  mangleQualifiers(Qualifiers::fromCVRUMask(T->getTypeQuals()));
 
   // Mangle instantiation-dependent exception-specification, if present,
   // per cxx-abi-dev proposal on 2016-10-11.

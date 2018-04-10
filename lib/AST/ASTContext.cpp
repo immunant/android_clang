@@ -2186,7 +2186,7 @@ structHasUniqueObjectRepresentations(const ASTContext &Context,
       }
     }
 
-    std::sort(
+    llvm::sort(
         Bases.begin(), Bases.end(), [&](const std::pair<QualType, int64_t> &L,
                                         const std::pair<QualType, int64_t> &R) {
           return Layout.getBaseClassOffset(L.first->getAsCXXRecordDecl()) <
@@ -2643,9 +2643,11 @@ void ASTContext::adjustExceptionSpec(
 }
 
 bool ASTContext::isParamDestroyedInCallee(QualType T) const {
-  return getTargetInfo().getCXXABI().areArgsDestroyedLeftToRightInCallee() ||
-         T.hasTrivialABIOverride() ||
-         T.isDestructedType() == QualType::DK_nontrivial_c_struct;
+  if (getTargetInfo().getCXXABI().areArgsDestroyedLeftToRightInCallee())
+    return true;
+  if (const auto *RT = T->getBaseElementTypeUnsafe()->getAs<RecordType>())
+    return RT->getDecl()->isParamDestroyedInCallee();
+  return false;
 }
 
 /// getComplexType - Return the uniqued reference to the type for a complex
@@ -8241,6 +8243,8 @@ QualType ASTContext::mergeFunctionTypes(QualType lhs, QualType rhs,
     return QualType();
   if (lbaseInfo.getNoCallerSavedRegs() != rbaseInfo.getNoCallerSavedRegs())
     return QualType();
+  if (lbaseInfo.getNoCfCheck() != rbaseInfo.getNoCfCheck())
+    return QualType();
 
   // FIXME: some uses, e.g. conditional exprs, really want this to be 'both'.
   bool NoReturn = lbaseInfo.getNoReturn() || rbaseInfo.getNoReturn();
@@ -9402,8 +9406,7 @@ bool ASTContext::DeclMustBeEmitted(const Decl *D) {
       return false;
   } else if (isa<PragmaCommentDecl>(D))
     return true;
-  else if (isa<OMPThreadPrivateDecl>(D) ||
-           D->hasAttr<OMPDeclareTargetDeclAttr>())
+  else if (isa<OMPThreadPrivateDecl>(D))
     return true;
   else if (isa<PragmaDetectMismatchDecl>(D))
     return true;
@@ -9491,6 +9494,15 @@ bool ASTContext::DeclMustBeEmitted(const Decl *D) {
       if (auto *BindingVD = BD->getHoldingVar())
         if (DeclMustBeEmitted(BindingVD))
           return true;
+
+  // If the decl is marked as `declare target`, it should be emitted.
+  for (const auto *Decl : D->redecls()) {
+    if (!Decl->hasAttrs())
+      continue;
+    if (const auto *Attr = Decl->getAttr<OMPDeclareTargetDeclAttr>())
+      if (Attr->getMapType() != OMPDeclareTargetDeclAttr::MT_Link)
+        return true;
+  }
 
   return false;
 }

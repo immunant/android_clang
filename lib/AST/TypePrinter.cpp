@@ -780,6 +780,10 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
     case CC_OpenCLKernel:
       // Do nothing. These CCs are not available as attributes.
       break;
+    case CC_CUDAKernel:
+      // ToDo: print this before the function.
+      OS << " __global__";
+      break;
     case CC_Swift:
       OS << " __attribute__((swiftcall))";
       break;
@@ -801,6 +805,8 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
        << Info.getRegParm() << ")))";
   if (Info.getNoCallerSavedRegs())
     OS << " __attribute__((no_caller_saved_registers))";
+  if (Info.getNoCfCheck())
+    OS << " __attribute__((nocf_check))";
 }
 
 void TypePrinter::printFunctionNoProtoBefore(const FunctionNoProtoType *T, 
@@ -1396,7 +1402,7 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   // FIXME: When Sema learns to form this AttributedType, avoid printing the
   // attribute again in printFunctionProtoAfter.
   case AttributedType::attr_noreturn: OS << "noreturn"; break;
-
+  case AttributedType::attr_nocf_check: OS << "nocf_check"; break;
   case AttributedType::attr_cdecl: OS << "cdecl"; break;
   case AttributedType::attr_fastcall: OS << "fastcall"; break;
   case AttributedType::attr_stdcall: OS << "stdcall"; break;

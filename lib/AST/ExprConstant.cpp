@@ -63,14 +63,22 @@ namespace {
 
   static QualType getType(APValue::LValueBase B) {
     if (!B) return QualType();
-    if (const ValueDecl *D = B.dyn_cast<const ValueDecl*>())
+    if (const ValueDecl *D = B.dyn_cast<const ValueDecl*>()) {
       // FIXME: It's unclear where we're supposed to take the type from, and
-      // this actually matters for arrays of unknown bound. Using the type of
-      // the most recent declaration isn't clearly correct in general. Eg:
+      // this actually matters for arrays of unknown bound. Eg:
       //
       // extern int arr[]; void f() { extern int arr[3]; };
       // constexpr int *p = &arr[1]; // valid?
-      return cast<ValueDecl>(D->getMostRecentDecl())->getType();
+      //
+      // For now, we take the array bound from the most recent declaration.
+      for (auto *Redecl = cast<ValueDecl>(D->getMostRecentDecl()); Redecl;
+           Redecl = cast_or_null<ValueDecl>(Redecl->getPreviousDecl())) {
+        QualType T = Redecl->getType();
+        if (!T->isIncompleteArrayType())
+          return T;
+      }
+      return D->getType();
+    }
 
     const Expr *Base = B.get<const Expr*>();
 
@@ -5467,8 +5475,8 @@ static bool getBytesReturnedByAllocSizeCall(const ASTContext &Ctx,
                                             llvm::APInt &Result) {
   const AllocSizeAttr *AllocSize = getAllocSizeAttr(Call);
 
-  assert(AllocSize && AllocSize->elemSizeParam().isValid());
-  unsigned SizeArgNo = AllocSize->elemSizeParam().getASTIndex();
+  assert(AllocSize && AllocSize->getElemSizeParam().isValid());
+  unsigned SizeArgNo = AllocSize->getElemSizeParam().getASTIndex();
   unsigned BitsInSizeT = Ctx.getTypeSize(Ctx.getSizeType());
   if (Call->getNumArgs() <= SizeArgNo)
     return false;
@@ -5486,13 +5494,13 @@ static bool getBytesReturnedByAllocSizeCall(const ASTContext &Ctx,
   if (!EvaluateAsSizeT(Call->getArg(SizeArgNo), SizeOfElem))
     return false;
 
-  if (!AllocSize->numElemsParam().isValid()) {
+  if (!AllocSize->getNumElemsParam().isValid()) {
     Result = std::move(SizeOfElem);
     return true;
   }
 
   APSInt NumberOfElems;
-  unsigned NumArgNo = AllocSize->numElemsParam().getASTIndex();
+  unsigned NumArgNo = AllocSize->getNumElemsParam().getASTIndex();
   if (!EvaluateAsSizeT(Call->getArg(NumArgNo), NumberOfElems))
     return false;
 

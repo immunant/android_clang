@@ -1481,7 +1481,6 @@ bool Sema::IsFunctionConversion(QualType FromType, QualType ToType,
                  .getTypePtr());
       Changed = true;
     }
-
     // Convert FromFPT's ExtParameterInfo if necessary. The conversion is valid
     // only if the ExtParameterInfo lists of the two function prototypes can be
     // merged and the merged list is identical to ToFPT's ExtParameterInfo list.
@@ -6245,12 +6244,17 @@ convertArgsForAvailabilityChecks(Sema &S, FunctionDecl *Function, Expr *ThisArg,
   if (!Function->isVariadic() && Args.size() < Function->getNumParams()) {
     for (unsigned i = Args.size(), e = Function->getNumParams(); i != e; ++i) {
       ParmVarDecl *P = Function->getParamDecl(i);
-      ExprResult R = S.PerformCopyInitialization(
-          InitializedEntity::InitializeParameter(S.Context,
-                                                 Function->getParamDecl(i)),
-          SourceLocation(),
-          P->hasUninstantiatedDefaultArg() ? P->getUninstantiatedDefaultArg()
-                                           : P->getDefaultArg());
+      Expr *DefArg = P->hasUninstantiatedDefaultArg()
+                         ? P->getUninstantiatedDefaultArg()
+                         : P->getDefaultArg();
+      // This can only happen in code completion, i.e. when PartialOverloading
+      // is true.
+      if (!DefArg)
+        return false;
+      ExprResult R =
+          S.PerformCopyInitialization(InitializedEntity::InitializeParameter(
+                                          S.Context, Function->getParamDecl(i)),
+                                      SourceLocation(), DefArg);
       if (R.isInvalid())
         return false;
       ConvertedArgs.push_back(R.get());
@@ -10683,8 +10687,8 @@ void TemplateSpecCandidateSet::NoteCandidates(Sema &S, SourceLocation Loc) {
     // in general, want to list every possible builtin candidate.
   }
 
-  std::sort(Cands.begin(), Cands.end(),
-            CompareTemplateSpecCandidatesForDisplay(S));
+  llvm::sort(Cands.begin(), Cands.end(),
+             CompareTemplateSpecCandidatesForDisplay(S));
 
   // FIXME: Perhaps rename OverloadsShown and getShowOverloads()
   // for generalization purposes (?).

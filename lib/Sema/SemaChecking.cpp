@@ -1097,20 +1097,14 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
       return ExprError();
     break;
   case Builtin::BI__builtin_operator_new:
-  case Builtin::BI__builtin_operator_delete:
-    if (!getLangOpts().CPlusPlus) {
-      Diag(TheCall->getExprLoc(), diag::err_builtin_requires_language)
-        << (BuiltinID == Builtin::BI__builtin_operator_new
-                ? "__builtin_operator_new"
-                : "__builtin_operator_delete")
-        << "C++";
-      return ExprError();
-    }
-    // CodeGen assumes it can find the global new and delete to call,
-    // so ensure that they are declared.
-    DeclareGlobalNewDelete();
-    break;
-
+  case Builtin::BI__builtin_operator_delete: {
+    bool IsDelete = BuiltinID == Builtin::BI__builtin_operator_delete;
+    ExprResult Res =
+        SemaBuiltinOperatorNewDeleteOverloaded(TheCallResult, IsDelete);
+    if (Res.isInvalid())
+      CorrectDelayedTyposInExpr(TheCallResult.get());
+    return Res;
+  }
   // check secure string manipulation functions where overflows
   // are detectable at compile time
   case Builtin::BI__builtin___memcpy_chk:
@@ -1214,7 +1208,6 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
   case Builtin::BIget_kernel_preferred_work_group_size_multiple:
     if (SemaOpenCLBuiltinKernelWorkGroupSize(*this, TheCall))
       return ExprError();
-    break;
     break;
   case Builtin::BIget_kernel_max_sub_group_size_for_ndrange:
   case Builtin::BIget_kernel_sub_group_count_for_ndrange:
@@ -5003,7 +4996,7 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
     const CallExpr *CE = cast<CallExpr>(E);
     if (const NamedDecl *ND = dyn_cast_or_null<NamedDecl>(CE->getCalleeDecl())) {
       if (const FormatArgAttr *FA = ND->getAttr<FormatArgAttr>()) {
-        const Expr *Arg = CE->getArg(FA->formatIdx().getASTIndex());
+        const Expr *Arg = CE->getArg(FA->getFormatIdx().getASTIndex());
         return checkFormatStringExpr(S, Arg, Args,
                                      HasVAListArg, format_idx, firstDataArg,
                                      Type, CallType, InFunctionCall,
@@ -5028,7 +5021,7 @@ checkFormatStringExpr(Sema &S, const Expr *E, ArrayRef<const Expr *> Args,
     const auto *ME = cast<ObjCMessageExpr>(E);
     if (const auto *ND = ME->getMethodDecl()) {
       if (const auto *FA = ND->getAttr<FormatArgAttr>()) {
-        const Expr *Arg = ME->getArg(FA->formatIdx().getASTIndex());
+        const Expr *Arg = ME->getArg(FA->getFormatIdx().getASTIndex());
         return checkFormatStringExpr(
             S, Arg, Args, HasVAListArg, format_idx, firstDataArg, Type,
             CallType, InFunctionCall, CheckedVarArgs, UncoveredArg, Offset);
@@ -9183,6 +9176,32 @@ static void DiagnoseImpCast(Sema &S, Expr *E, QualType T,
   DiagnoseImpCast(S, E, E->getType(), T, CContext, diag, pruneControlFlow);
 }
 
+/// Analyze the given compound assignment for the possible losing of
+/// floating-point precision.
+static void AnalyzeCompoundAssignment(Sema &S, BinaryOperator *E) {
+  assert(isa<CompoundAssignOperator>(E) &&
+         "Must be compound assignment operation");
+  // Recurse on the LHS and RHS in here
+  AnalyzeImplicitConversions(S, E->getLHS(), E->getOperatorLoc());
+  AnalyzeImplicitConversions(S, E->getRHS(), E->getOperatorLoc());
+
+  // Now check the outermost expression
+  const auto *ResultBT = E->getLHS()->getType()->getAs<BuiltinType>();
+  const auto *RBT = cast<CompoundAssignOperator>(E)
+                        ->getComputationResultType()
+                        ->getAs<BuiltinType>();
+
+  // If both source and target are floating points.
+  if (ResultBT && ResultBT->isFloatingPoint() && RBT && RBT->isFloatingPoint())
+    // Builtin FP kinds are ordered by increasing FP rank.
+    if (ResultBT->getKind() < RBT->getKind())
+      // We don't want to warn for system macro.
+      if (!S.SourceMgr.isInSystemMacro(E->getOperatorLoc()))
+        // warn about dropping FP rank.
+        DiagnoseImpCast(S, E->getRHS(), E->getLHS()->getType(),
+                        E->getOperatorLoc(),
+                        diag::warn_impcast_float_result_precision);
+}
 
 /// Diagnose an implicit cast from a floating point value to an integer value.
 static void DiagnoseFloatingImpCast(Sema &S, Expr *E, QualType T,
@@ -9550,7 +9569,7 @@ CheckImplicitConversion(Sema &S, Expr *E, QualType T, SourceLocation CC,
         return;
       return DiagnoseImpCast(S, E, T, CC, diag::warn_impcast_vector_scalar);
     }
-    
+
     // If the vector cast is cast between two vectors of the same size, it is
     // a bitcast, not a conversion.
     if (S.Context.getTypeSize(Source) == S.Context.getTypeSize(Target))
@@ -9827,7 +9846,7 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
 
   if (E->isTypeDependent() || E->isValueDependent())
     return;
-  
+
   // For conditional operators, we analyze the arguments as if they
   // were being fed directly into the output.
   if (isa<ConditionalOperator>(E)) {
@@ -9871,6 +9890,9 @@ static void AnalyzeImplicitConversions(Sema &S, Expr *OrigE,
     // And with simple assignments.
     if (BO->getOpcode() == BO_Assign)
       return AnalyzeAssignment(S, BO);
+    // And with compound assignments.
+    if (BO->isAssignmentOp())
+      return AnalyzeCompoundAssignment(S, BO);
   }
 
   // These break the otherwise-useful invariant below.  Fortunately,
@@ -10203,18 +10225,22 @@ void Sema::CheckForIntOverflow (Expr *E) {
   SmallVector<Expr *, 2> Exprs(1, E);
 
   do {
-    Expr *E = Exprs.pop_back_val();
+    Expr *OriginalE = Exprs.pop_back_val();
+    Expr *E = OriginalE->IgnoreParenCasts();
 
-    if (isa<BinaryOperator>(E->IgnoreParenCasts())) {
-      E->IgnoreParenCasts()->EvaluateForOverflow(Context);
+    if (isa<BinaryOperator>(E)) {
+      E->EvaluateForOverflow(Context);
       continue;
     }
 
-    if (auto InitList = dyn_cast<InitListExpr>(E))
+    if (auto InitList = dyn_cast<InitListExpr>(OriginalE))
       Exprs.append(InitList->inits().begin(), InitList->inits().end());
-
-    if (isa<ObjCBoxedExpr>(E))
-      E->IgnoreParenCasts()->EvaluateForOverflow(Context);
+    else if (isa<ObjCBoxedExpr>(OriginalE))
+      E->EvaluateForOverflow(Context);
+    else if (auto Call = dyn_cast<CallExpr>(E))
+      Exprs.append(Call->arg_begin(), Call->arg_end());
+    else if (auto Message = dyn_cast<ObjCMessageExpr>(E))
+      Exprs.append(Message->arg_begin(), Message->arg_end());
   } while (!Exprs.empty());
 }
 
@@ -11495,7 +11521,7 @@ void Sema::CheckObjCCircularContainer(ObjCMessageExpr *Message) {
       if (ArgRE->isObjCSelfExpr()) {
         Diag(Message->getSourceRange().getBegin(),
              diag::warn_objc_circular_container)
-          << ArgRE->getDecl()->getName() << StringRef("super");
+          << ArgRE->getDecl() << StringRef("'super'");
       }
     }
   } else {
@@ -11511,11 +11537,11 @@ void Sema::CheckObjCCircularContainer(ObjCMessageExpr *Message) {
           ValueDecl *Decl = ReceiverRE->getDecl();
           Diag(Message->getSourceRange().getBegin(),
                diag::warn_objc_circular_container)
-            << Decl->getName() << Decl->getName();
+            << Decl << Decl;
           if (!ArgRE->isObjCSelfExpr()) {
             Diag(Decl->getLocation(),
                  diag::note_objc_circular_container_declared_here)
-              << Decl->getName();
+              << Decl;
           }
         }
       }
@@ -11525,10 +11551,10 @@ void Sema::CheckObjCCircularContainer(ObjCMessageExpr *Message) {
           ObjCIvarDecl *Decl = IvarRE->getDecl();
           Diag(Message->getSourceRange().getBegin(),
                diag::warn_objc_circular_container)
-            << Decl->getName() << Decl->getName();
+            << Decl << Decl;
           Diag(Decl->getLocation(),
                diag::note_objc_circular_container_declared_here)
-            << Decl->getName();
+            << Decl;
         }
       }
     }
@@ -12237,10 +12263,10 @@ void Sema::CheckArgumentWithTypeTag(const ArgumentWithTypeTagAttr *Attr,
   bool IsPointerAttr = Attr->getIsPointer();
 
   // Retrieve the argument representing the 'type_tag'.
-  unsigned TypeTagIdxAST = Attr->typeTagIdx().getASTIndex();
+  unsigned TypeTagIdxAST = Attr->getTypeTagIdx().getASTIndex();
   if (TypeTagIdxAST >= ExprArgs.size()) {
     Diag(CallSiteLoc, diag::err_tag_index_out_of_range)
-        << 0 << Attr->typeTagIdx().getSourceIndex();
+        << 0 << Attr->getTypeTagIdx().getSourceIndex();
     return;
   }
   const Expr *TypeTagExpr = ExprArgs[TypeTagIdxAST];
@@ -12257,10 +12283,10 @@ void Sema::CheckArgumentWithTypeTag(const ArgumentWithTypeTagAttr *Attr,
   }
 
   // Retrieve the argument representing the 'arg_idx'.
-  unsigned ArgumentIdxAST = Attr->argumentIdx().getASTIndex();
+  unsigned ArgumentIdxAST = Attr->getArgumentIdx().getASTIndex();
   if (ArgumentIdxAST >= ExprArgs.size()) {
     Diag(CallSiteLoc, diag::err_tag_index_out_of_range)
-        << 1 << Attr->argumentIdx().getSourceIndex();
+        << 1 << Attr->getArgumentIdx().getSourceIndex();
     return;
   }
   const Expr *ArgumentExpr = ExprArgs[ArgumentIdxAST];
