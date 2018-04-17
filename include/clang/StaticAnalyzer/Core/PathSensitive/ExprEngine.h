@@ -105,11 +105,6 @@ public:
     /// This call is a constructor or a destructor of a temporary value.
     bool IsTemporaryCtorOrDtor = false;
 
-    /// This call is a constructor for a temporary that is lifetime-extended
-    /// by binding a smaller object within it to a reference, for example
-    /// 'const int &x = C().x;'.
-    bool IsTemporaryLifetimeExtendedViaSubobject = false;
-
     EvalCallOptions() {}
   };
 
