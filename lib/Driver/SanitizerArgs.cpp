@@ -43,7 +43,7 @@ enum : SanitizerMask {
                       Nullability | LocalBounds | CFI,
   TrappingDefault = CFI,
   CFIClasses = CFIVCall | CFINVCall | CFIDerivedCast | CFIUnrelatedCast,
-  CompatibleWithMinimalRuntime = TrappingSupported,
+  CompatibleWithMinimalRuntime = TrappingSupported | Pagerando,
 };
 
 enum CoverageFeature {
